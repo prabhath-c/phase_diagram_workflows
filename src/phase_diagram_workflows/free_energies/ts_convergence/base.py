@@ -128,7 +128,25 @@ def resolve_current_bracket(
     -------
     Tuple[float, float]
         The current ``(t_low, t_high)`` bracket.
+
+    Raises
+    ------
+    ValueError
+        If the lower and upper bounds were narrowed independently, in
+        separate attempts, far enough that combining their most restrictive
+        values produces an inverted/empty bracket that no single attempt
+        actually ran. Raised here rather than silently returned, since the
+        caller (`refine_temperature_bracket`) submits this bracket for real.
     """
     lows = [initial_bracket[0]] + [b[0] for b in tried_brackets]
     highs = [initial_bracket[1]] + [b[1] for b in tried_brackets]
-    return max(lows), min(highs)
+    t_low, t_high = max(lows), min(highs)
+
+    if t_low >= t_high:
+        raise ValueError(
+            f"Combining independently narrowed bounds produced an invalid "
+            f"bracket ({t_low}, {t_high}); the lower and upper bounds were "
+            f"narrowed past each other across different attempts: {tried_brackets}"
+        )
+
+    return t_low, t_high

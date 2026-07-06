@@ -20,13 +20,13 @@ dependencies = [
     "pandas",
     "lammpsparser",
     "ruamel.yaml",
-    "pydantic>=2,<3",
-    "matplotlib"
+    "pydantic>=2,<3"
 ]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "black", "ruff", "mypy"]
 executor = ["executorlib>=1.0.0", "pylammpsmpi>=0.1.0"]
+plotting = ["matplotlib"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/phase_diagram_workflows"]

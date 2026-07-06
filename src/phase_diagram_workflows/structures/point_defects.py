@@ -25,13 +25,20 @@ def generate_random_binary_structures(
         mixing_element='Mg',
         phase_type='fcc',
         reference_phase='solid',
-        concentrations=[0, 0.5, 1],
-        approximations=['antisites'],
+        concentrations=None,
+        approximations=None,
         seed=None):
     """
     Adjusts the concentration of mixing_element to desired values by substitution.
     Initial structure may contain both elements already.
     """
+    if concentrations is None:
+        concentrations = [0, 0.5, 1]
+    if approximations is None:
+        approximations = ['antisites']
+    else:
+        approximations = list(approximations)  # avoid mutating the caller's list
+
     rng = np.random.default_rng(seed)
     n_sites = len(base_structure)
     structures = []
@@ -72,7 +79,6 @@ def generate_random_binary_structures(
                 approx = ['antisites']
 
             elif delta_n == 0:
-                print("Already at target position")
                 approx = ["stoichiometric"]
 
         final_seed = seed

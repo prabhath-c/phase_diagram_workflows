@@ -106,7 +106,7 @@ jobs:
 
     - name: Install package
       shell: bash -el {0}
-      run: pip install -e .[dev,executor]
+      run: pip install -e .[dev,executor,plotting]
 
     - name: Run tests
       shell: bash -el {0}

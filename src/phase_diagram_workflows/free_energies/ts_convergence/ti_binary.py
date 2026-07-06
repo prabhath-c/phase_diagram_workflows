@@ -3,8 +3,12 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-import matplotlib.pyplot as plt
 import pandas as pd
+
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
 
 from phase_diagram_workflows.free_energies.ti_calculator import (
     calc_free_energy_with_calphy,
@@ -18,6 +22,14 @@ from phase_diagram_workflows.free_energies.ts_convergence.base import (
 )
 
 _IDENTITY_COLUMNS = ["main_element", "mixing_element", "phase_type", "reference_phase", "c_in"]
+
+
+def _require_matplotlib() -> None:
+    if plt is None:
+        raise ImportError(
+            "matplotlib is required for plotting functions in ts_convergence.ti_binary. "
+            "Install it, e.g. `pip install matplotlib`."
+        )
 
 
 def _bracket_prefix(row: pd.Series, conc_decimals: int = 6) -> str:
@@ -52,8 +64,15 @@ def _find_tried_brackets(working_directory_root: str, prefix: str) -> List[Tuple
             continue
         if not os.path.isdir(os.path.join(working_directory_root, name)):
             continue
-        t_low_str, t_high_str = name[len(marker):].split("_")
-        tried.append((float(t_low_str), float(t_high_str)))
+
+        parts = name[len(marker):].split("_")
+        if len(parts) != 2:
+            continue  # unparsable suffix (e.g. a manual backup folder) -- skip, don't crash
+        try:
+            t_low, t_high = float(parts[0]), float(parts[1])
+        except ValueError:
+            continue
+        tried.append((t_low, t_high))
 
     return tried
 
@@ -72,11 +91,14 @@ def refine_temperature_bracket(
 ) -> Dict[str, Any]:
     """Submit, check, and narrow a TI temperature bracket for one structure row.
 
-    Stateless and idempotent: recomputes the current bracket from whatever
-    brackets have already been attempted on disk (see `_find_tried_brackets`),
-    then resubmits unconditionally through `executor.submit` -- if that exact
-    bracket has already run, the executor's own cache returns it without
-    rerunning anything.
+    Stateless, and safe to resubmit unconditionally: recomputes the current
+    bracket from whatever brackets have already been attempted on disk (see
+    `_find_tried_brackets`), then always calls `executor.submit`. With a
+    caching executor (e.g. executorlib's `cache_directory`), submitting an
+    already-finished bracket again is idempotent -- the cached result is
+    returned without rerunning anything. A plain, non-caching executor (e.g.
+    `concurrent.futures.ThreadPoolExecutor`) will instead redo the same
+    computation; still correct, just not free.
 
     Parameters
     ----------
@@ -318,6 +340,7 @@ def plot_criterion_vs_concentration(
     -------
     Tuple[plt.Figure, plt.Axes]
     """
+    _require_matplotlib()
     if ax is None:
         fig, ax = plt.subplots()
     else:
@@ -364,6 +387,7 @@ def plot_criterion_by_bracket(
     -------
     Tuple[plt.Figure, plt.Axes]
     """
+    _require_matplotlib()
     if ax is None:
         fig, ax = plt.subplots()
     else:

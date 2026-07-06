@@ -81,6 +81,13 @@ class TestResolveCurrentBracket:
     def test_both_bounds_narrow_independently(self):
         assert resolve_current_bracket((300, 1000), [(350, 900)]) == (350, 900)
 
+    def test_bounds_narrowed_past_each_other_raises(self):
+        # Neither (600, 1000) nor (300, 500) was ever run as a single
+        # attempt; combining their most-restrictive bounds independently
+        # gives (600, 500), which is inverted.
+        with pytest.raises(ValueError, match="narrowed past each other"):
+            resolve_current_bracket((300, 1000), [(600, 1000), (300, 500)])
+
 
 class TestBracketPrefixAndWorkingDirectory:
     def test_prefix_uses_six_decimals_by_default(self):
@@ -115,6 +122,17 @@ class TestFindTriedBrackets:
 
             tried = _find_tried_brackets(tmpdir, "AlMg_fcc_solid_0.125000")
             assert sorted(tried) == [(300.0, 900.0), (350.0, 900.0)]
+
+    def test_skips_unparsable_folder_names_instead_of_crashing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, "AlMg_fcc_solid_0.125000_T_300.00_900.00"))
+            # A manual backup copy with an extra underscore in the suffix.
+            os.makedirs(os.path.join(tmpdir, "AlMg_fcc_solid_0.125000_T_300.00_900.00_backup"))
+            # Non-numeric suffix.
+            os.makedirs(os.path.join(tmpdir, "AlMg_fcc_solid_0.125000_T_abc_def"))
+
+            tried = _find_tried_brackets(tmpdir, "AlMg_fcc_solid_0.125000")
+            assert tried == [(300.0, 900.0)]
 
 
 class EagerExecutor:
