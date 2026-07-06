@@ -7,12 +7,13 @@ Tests validation functions and main workflow with mocked external dependencies.
 import pytest
 import tempfile
 import os
+import shutil
 from unittest.mock import Mock, patch
 import numpy as np
 import pandas as pd
-import yaml
 from ase.atoms import Atoms
 from ase.build import bulk
+from lammpsparser import get_potential_by_name
 
 from phase_diagram_workflows.free_energies.ti_helpers import (
     _validate_input_structure,
@@ -20,115 +21,135 @@ from phase_diagram_workflows.free_energies.ti_helpers import (
     _validate_calphy_parameters,
     _working_directory_context,
 )
-from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
+from phase_diagram_workflows.free_energies.ti_calculator import (
+    calc_free_energy_with_calphy,
+    gather_calphy_results_detailed,
+)
 
 
-def _write_input_file_yaml(wd, mode="ts", reference_phase="solid", pressure=0.0, temperature=(300.0, 400.0)):
-    inp = {"calculations": [{
+def _real_base_params(mode, temperature):
+    return {
         "mode": mode,
-        "reference_phase": reference_phase,
-        "pressure": pressure,
-        "temperature": list(temperature),
-    }]}
-    with open(os.path.join(wd, "input_file.yaml"), "w") as f:
-        yaml.safe_dump(inp, f)
-
-
-def _write_report_yaml(wd, elements="Al", concentrations="1.0", free_energy=-3.5):
-    rep = {
-        "input": {"element": elements, "concentration": concentrations},
-        "results": {"free_energy": free_energy},
+        "temperature": temperature,
+        "pressure": 0,
+        "n_equilibration_steps": 100,
+        "n_switching_steps": 100,
+        "n_print_steps": 25,
+        "equilibration_control": "berendsen",
+        "md": {"thermostat_damping": 0.5},
+        "tolerance": {"spring_constant": 0.01, "pressure": 0.5},
+        "queue": {"cores": 1, "scheduler": "local"},
+        "reference_phase": "solid",
+        "file_format": "lammps-data",
     }
-    with open(os.path.join(wd, "report.yaml"), "w") as f:
-        yaml.safe_dump(rep, f)
 
 
-def _write_temperature_sweep(wd, n=5):
-    t = np.linspace(300.0, 400.0, n)
-    fe = np.linspace(-3.5, -3.4, n)
-    ferr = np.zeros(n)
-    np.savetxt(os.path.join(wd, "temperature_sweep.dat"), np.column_stack([t, fe, ferr]))
+@pytest.fixture(scope="module")
+def real_potential_df():
+    pot = get_potential_by_name("1999--Mishin-Y--Al--LAMMPS--ipr1")
+    return pot.to_frame().transpose()
 
 
-def _write_ts_pair(wd, index=1, n=5):
-    dx = np.linspace(0.1, 0.2, n)
-    p = np.zeros(n)
-    vol = np.ones(n)
-    lam = np.linspace(1.0, 0.5, n)
-    np.savetxt(os.path.join(wd, f"ts.forward_{index}.dat"), np.column_stack([dx, p, vol, lam]))
-    np.savetxt(os.path.join(wd, f"ts.backward_{index}.dat"), np.column_stack([dx, p, vol, lam]))
+@pytest.fixture(scope="module")
+def real_structure():
+    return bulk("Al", cubic=True).repeat(2)  # 32 atoms: small and fast
+
+
+@pytest.fixture(scope="module")
+def real_ts_calphy_run(real_structure, real_potential_df, tmp_path_factory):
+    """A single real, small, fast ts-mode calphy run, reused (read-only) by
+    the tests below via copies -- so edge cases (missing files) can be
+    exercised on genuine calphy output without rerunning calphy per case."""
+    working_directory = str(tmp_path_factory.mktemp("real_ts_run"))
+    calc_free_energy_with_calphy(
+        input_structure=real_structure,
+        potential_df=real_potential_df,
+        calphy_parameters=_real_base_params("ts", [700.0, 720.0]),
+        working_directory=working_directory,
+    )
+    return working_directory
+
+
+@pytest.fixture(scope="module")
+def real_fe_calphy_run(real_structure, real_potential_df, tmp_path_factory):
+    working_directory = str(tmp_path_factory.mktemp("real_fe_run"))
+    calc_free_energy_with_calphy(
+        input_structure=real_structure,
+        potential_df=real_potential_df,
+        calphy_parameters=_real_base_params("fe", 700.0),
+        working_directory=working_directory,
+    )
+    return working_directory
+
+
+def _copy_of(src_dir, dst_dir):
+    shutil.copytree(src_dir, dst_dir)
+    return dst_dir
 
 
 class TestGatherCalphyResultsDetailed:
-    """Tests for gather_calphy_results_detailed() edge cases in its own parsing logic"""
+    """Tests for gather_calphy_results_detailed() edge cases in its own parsing logic.
+
+    Edge cases (a file missing/incomplete, as if a job crashed mid-write) are
+    exercised by deleting one file from a genuine calphy run's output,
+    rather than fabricating a whole directory of guessed-format files.
+    """
 
     def test_missing_input_file_raises(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with pytest.raises(FileNotFoundError, match="input_file.yaml"):
                 gather_calphy_results_detailed(tmpdir)
 
-    def test_missing_report_yaml(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _write_input_file_yaml(tmpdir)
-            df = gather_calphy_results_detailed(tmpdir)
-            row = df.iloc[0]
-            assert bool(row["status"]) is False
-            assert row["composition"] is None
+    def test_missing_report_yaml(self, real_ts_calphy_run, tmp_path):
+        wd = _copy_of(real_ts_calphy_run, str(tmp_path / "run"))
+        os.remove(os.path.join(wd, "report.yaml"))
 
-    def test_missing_temperature_sweep_falls_back_to_nan_arrays(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _write_input_file_yaml(tmpdir, temperature=(300.0, 400.0))
-            _write_report_yaml(tmpdir)
-            df = gather_calphy_results_detailed(tmpdir)
-            row = df.iloc[0]
-            assert len(row["free_energy"]) == len(row["temperature"])
-            assert len(row["free_energy_error"]) == len(row["temperature"])
-            assert np.all(np.isnan(row["free_energy"]))
-            assert np.all(np.isnan(row["free_energy_error"]))
+        df = gather_calphy_results_detailed(wd)
+        row = df.iloc[0]
+        assert bool(row["status"]) is False
+        assert row["composition"] is None
 
-    def test_partial_ts_pair_missing_backward_stops_gathering(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _write_input_file_yaml(tmpdir)
-            _write_report_yaml(tmpdir)
-            _write_temperature_sweep(tmpdir)
-            # Only the forward file for iteration 1 exists, backward is missing.
-            dx = np.linspace(0.1, 0.2, 5)
-            np.savetxt(
-                os.path.join(tmpdir, "ts.forward_1.dat"),
-                np.column_stack([dx, np.zeros(5), np.ones(5), np.linspace(1.0, 0.5, 5)]),
-            )
-            df = gather_calphy_results_detailed(tmpdir)
-            row = df.iloc[0]
-            assert row["forward_energy_diff"] is None
-            assert row["backward_energy_diff"] is None
+    def test_missing_temperature_sweep_falls_back_to_nan_arrays(self, real_ts_calphy_run, tmp_path):
+        wd = _copy_of(real_ts_calphy_run, str(tmp_path / "run"))
+        os.remove(os.path.join(wd, "temperature_sweep.dat"))
 
-    def test_ts_forward_backward_pairs_are_read(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _write_input_file_yaml(tmpdir)
-            _write_report_yaml(tmpdir)
-            _write_temperature_sweep(tmpdir)
-            _write_ts_pair(tmpdir, index=1)
-            df = gather_calphy_results_detailed(tmpdir)
-            row = df.iloc[0]
-            assert len(row["forward_energy_diff"]) == 1
-            assert len(row["backward_energy_diff"]) == 1
+        df = gather_calphy_results_detailed(wd)
+        row = df.iloc[0]
+        assert len(row["free_energy"]) == len(row["temperature"])
+        assert len(row["free_energy_error"]) == len(row["temperature"])
+        assert np.all(np.isnan(row["free_energy"]))
+        assert np.all(np.isnan(row["free_energy_error"]))
 
-    def test_fe_mode_missing_report_gives_nan_error_not_zero(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _write_input_file_yaml(tmpdir, mode="fe", temperature=(300.0,))
-            df = gather_calphy_results_detailed(tmpdir)
-            row = df.iloc[0]
-            assert np.isnan(row["free_energy"])
-            assert np.isnan(row["free_energy_error"])
+    def test_partial_ts_pair_missing_backward_stops_gathering(self, real_ts_calphy_run, tmp_path):
+        wd = _copy_of(real_ts_calphy_run, str(tmp_path / "run"))
+        os.remove(os.path.join(wd, "ts.backward_1.dat"))
 
-    def test_fe_mode_with_report_gives_zero_error(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _write_input_file_yaml(tmpdir, mode="fe", temperature=(300.0,))
-            _write_report_yaml(tmpdir, free_energy=-3.45)
-            df = gather_calphy_results_detailed(tmpdir)
-            row = df.iloc[0]
-            assert row["free_energy"] == -3.45
-            assert row["free_energy_error"] == 0.0
+        df = gather_calphy_results_detailed(wd)
+        row = df.iloc[0]
+        assert row["forward_energy_diff"] is None
+        assert row["backward_energy_diff"] is None
+
+    def test_ts_forward_backward_pairs_are_read(self, real_ts_calphy_run):
+        df = gather_calphy_results_detailed(real_ts_calphy_run)
+        row = df.iloc[0]
+        assert len(row["forward_energy_diff"]) == 1
+        assert len(row["backward_energy_diff"]) == 1
+        assert row["status"]
+
+    def test_fe_mode_missing_report_gives_nan_error_not_zero(self, real_fe_calphy_run, tmp_path):
+        wd = _copy_of(real_fe_calphy_run, str(tmp_path / "run"))
+        os.remove(os.path.join(wd, "report.yaml"))
+
+        df = gather_calphy_results_detailed(wd)
+        row = df.iloc[0]
+        assert np.isnan(row["free_energy"])
+        assert np.isnan(row["free_energy_error"])
+
+    def test_fe_mode_with_report_gives_zero_error(self, real_fe_calphy_run):
+        df = gather_calphy_results_detailed(real_fe_calphy_run)
+        row = df.iloc[0]
+        assert not np.isnan(row["free_energy"])
+        assert row["free_energy_error"] == 0.0
 
 
 class TestValidateInputStructure:

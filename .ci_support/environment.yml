@@ -16,6 +16,7 @@ dependencies:
   - lammpsparser
   - ruamel.yaml
   - pydantic>=2,<3
+  - matplotlib
   - iprpy-data
 
   # Development dependencies

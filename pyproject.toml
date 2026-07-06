@@ -20,7 +20,8 @@ dependencies = [
     "pandas",
     "lammpsparser",
     "ruamel.yaml",
-    "pydantic>=2,<3"
+    "pydantic>=2,<3",
+    "matplotlib"
 ]
 
 [project.optional-dependencies]
