@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import FIRST_COMPLETED, wait
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -15,9 +16,8 @@ from phase_diagram_workflows.free_energies.ti_calculator import (
     gather_calphy_results_detailed,
 )
 from phase_diagram_workflows.free_energies.ts_convergence.base import (
-    check_ts_overlap,
+    decide_next_bracket,
     resolve_current_bracket,
-    step_bracket,
     ts_overlap_criterion,
 )
 
@@ -77,6 +77,65 @@ def _find_tried_brackets(working_directory_root: str, prefix: str) -> List[Tuple
     return tried
 
 
+def submit_bracket(
+    row: pd.Series,
+    bracket: Tuple[float, float],
+    calphy_parameters: Dict[str, Any],
+    potential_df: pd.DataFrame,
+    executor: Any,
+    working_directory_root: str,
+    conc_decimals: int = 6,
+) -> Tuple[Any, str]:
+    """Submit (or reconnect to) a specific, already-decided bracket.
+
+    Pure executor plumbing: no tolerance, no convergence decision, no
+    branching -- just "run this exact bracket." `tolerance` never appears
+    here at all, so there is nothing in this function's inputs that a
+    change in tolerance could possibly affect; it always submits/reconnects
+    the same bracket for the same cache key regardless of what any caller's
+    tolerance is doing.
+
+    Parameters
+    ----------
+    row : pd.Series
+        One row of a structures DataFrame, providing `main_element`,
+        `mixing_element`, `phase_type`, `reference_phase`, `c_in`, `atoms`.
+    bracket : Tuple[float, float]
+        The `(t_low, t_high)` bracket to submit.
+    calphy_parameters : Dict[str, Any]
+        Base calphy parameters; `temperature` is overwritten with `bracket`.
+    potential_df : pd.DataFrame
+        Potential DataFrame in pyiron-compatible format.
+    executor : Any
+        Object exposing `submit(fn, **kwargs) -> Future`, e.g. an
+        executorlib executor.
+    working_directory_root : str
+        Directory under which per-bracket working directories are created.
+    conc_decimals : int, optional
+        Decimal precision used when formatting `c_in` into the naming prefix.
+
+    Returns
+    -------
+    Tuple[Any, str]
+        The submitted future, and the working directory it was submitted to.
+    """
+    prefix = _bracket_prefix(row, conc_decimals=conc_decimals)
+    working_directory = _bracket_working_directory(working_directory_root, prefix, bracket[0], bracket[1])
+
+    params = dict(calphy_parameters)
+    params["temperature"] = [bracket[0], bracket[1]]
+
+    future = executor.submit(
+        calc_free_energy_with_calphy,
+        input_structure=row["atoms"],
+        potential_df=potential_df,
+        calphy_parameters=params,
+        working_directory=working_directory,
+    )
+
+    return future, working_directory
+
+
 def refine_temperature_bracket(
     row: pd.Series,
     calphy_parameters: Dict[str, Any],
@@ -91,14 +150,16 @@ def refine_temperature_bracket(
 ) -> Dict[str, Any]:
     """Submit, check, and narrow a TI temperature bracket for one structure row.
 
-    Stateless, and safe to resubmit unconditionally: recomputes the current
-    bracket from whatever brackets have already been attempted on disk (see
-    `_find_tried_brackets`), then always calls `executor.submit`. With a
-    caching executor (e.g. executorlib's `cache_directory`), submitting an
-    already-finished bracket again is idempotent -- the cached result is
-    returned without rerunning anything. A plain, non-caching executor (e.g.
-    `concurrent.futures.ThreadPoolExecutor`) will instead redo the same
-    computation; still correct, just not free.
+    Orchestrates two purpose-separated pieces: `submit_bracket` (executor
+    plumbing, no tolerance) and `decide_next_bracket` (tolerance-based
+    decision, no executor). Stateless, and safe to resubmit unconditionally:
+    recomputes the current bracket from whatever brackets have already been
+    attempted on disk (see `_find_tried_brackets`), then always calls
+    `executor.submit`. With a caching executor (e.g. executorlib's
+    `cache_directory`), submitting an already-finished bracket again is
+    idempotent -- the cached result is returned without rerunning anything.
+    A plain, non-caching executor (e.g. `concurrent.futures.ThreadPoolExecutor`)
+    will instead redo the same computation; still correct, just not free.
 
     Parameters
     ----------
@@ -121,7 +182,8 @@ def refine_temperature_bracket(
         The `(t_low, t_high)` bracket to start from if nothing has been
         tried yet for this row.
     tolerance : float
-        Passed to `check_ts_overlap` to decide convergence.
+        Passed to `decide_next_bracket` to decide convergence. Never reaches
+        `submit_bracket` or the executor.
     step_lower : Optional[float], optional
         If given, the lower bound is raised by this amount on non-convergence.
     step_upper : Optional[float], optional
@@ -143,24 +205,16 @@ def refine_temperature_bracket(
     """
     prefix = _bracket_prefix(row, conc_decimals=conc_decimals)
     tried_brackets = _find_tried_brackets(working_directory_root, prefix)
-    t_low, t_high = resolve_current_bracket(initial_bracket, tried_brackets)
-    working_directory = _bracket_working_directory(working_directory_root, prefix, t_low, t_high)
+    current_bracket = resolve_current_bracket(initial_bracket, tried_brackets)
 
-    params = dict(calphy_parameters)
-    params["temperature"] = [t_low, t_high]
-
-    future = executor.submit(
-        calc_free_energy_with_calphy,
-        input_structure=row["atoms"],
-        potential_df=potential_df,
-        calphy_parameters=params,
-        working_directory=working_directory,
+    future, working_directory = submit_bracket(
+        row, current_bracket, calphy_parameters, potential_df, executor, working_directory_root, conc_decimals
     )
 
     if not future.done():
         return {
             "status": "pending",
-            "bracket": (t_low, t_high),
+            "bracket": current_bracket,
             "working_directory": working_directory,
             "future": future,
         }
@@ -173,37 +227,127 @@ def refine_temperature_bracket(
     if forward is None or backward is None:
         return {
             "status": "incomplete",
-            "bracket": (t_low, t_high),
+            "bracket": current_bracket,
             "working_directory": working_directory,
             "df": df,
         }
 
-    if check_ts_overlap(forward[0], backward[0], tolerance):
+    criterion = ts_overlap_criterion(forward[0], backward[0])
+    next_bracket = decide_next_bracket(current_bracket, criterion, tolerance, step_lower=step_lower, step_upper=step_upper)
+
+    if next_bracket is None:
         return {
             "status": "converged",
-            "bracket": (t_low, t_high),
+            "bracket": current_bracket,
             "working_directory": working_directory,
             "df": df,
         }
 
-    new_t_low, new_t_high = step_bracket(t_low, t_high, step_lower=step_lower, step_upper=step_upper)
-    new_working_directory = _bracket_working_directory(working_directory_root, prefix, new_t_low, new_t_high)
-
-    new_future = executor.submit(
-        calc_free_energy_with_calphy,
-        input_structure=row["atoms"],
-        potential_df=potential_df,
-        calphy_parameters={**calphy_parameters, "temperature": [new_t_low, new_t_high]},
-        working_directory=new_working_directory,
+    new_future, new_working_directory = submit_bracket(
+        row, next_bracket, calphy_parameters, potential_df, executor, working_directory_root, conc_decimals
     )
 
     return {
         "status": "resubmitted",
-        "bracket": (new_t_low, new_t_high),
+        "bracket": next_bracket,
         "working_directory": new_working_directory,
         "df": df,
         "future": new_future,
     }
+
+
+def auto_refine_temperature_brackets(
+    structures_df: pd.DataFrame,
+    calphy_parameters: Dict[str, Any],
+    potential_df: pd.DataFrame,
+    executor: Any,
+    working_directory_root: str,
+    initial_bracket: Tuple[float, float],
+    tolerance: float,
+    step_lower: Optional[float] = None,
+    step_upper: Optional[float] = None,
+    conc_decimals: int = 6,
+    max_iterations: int = 10,
+) -> pd.DataFrame:
+    """Drive every row of a structures DataFrame to convergence automatically.
+
+    Unlike `refine_temperature_bracket`, which never blocks and expects to
+    be called again by hand whenever you want to check in, this blocks: it
+    repeatedly calls `refine_temperature_bracket` for every row that hasn't
+    converged yet, waits for at least one of their jobs to finish before
+    checking again, and keeps going until every row is "converged"/
+    "incomplete" or `max_iterations` check-in rounds have passed.
+
+    All rows are driven concurrently rather than one at a time -- each
+    round submits/reconnects every still-unconverged row before waiting, so
+    independent concentrations progress through SLURM in parallel instead
+    of blocking on one row's full narrowing history before starting the next.
+
+    `tolerance` here doesn't have to be right: nothing on disk is ever
+    destroyed, and every attempted bracket stays inspectable via
+    `build_criterion_table` regardless of what this function decided. A
+    row that never converges within `max_iterations` just keeps its last
+    status (e.g. still "resubmitted", with its narrowest bracket left
+    running) -- this does not raise, it simply stops waiting on that row.
+
+    Parameters
+    ----------
+    structures_df : pd.DataFrame
+        Structures DataFrame, one row per concentration/phase.
+    calphy_parameters, potential_df, executor, working_directory_root,
+    initial_bracket, tolerance, step_lower, step_upper, conc_decimals :
+        Passed straight through to `refine_temperature_bracket` for every row.
+    max_iterations : int, optional
+        Maximum number of check-in rounds across all rows before giving up
+        on whichever rows still haven't converged. Guards against both a
+        tolerance that's unreachable (endless narrowing) and a job that
+        never leaves the SLURM queue (endless waiting on the same future).
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per input row (same index), with the same columns
+        `refine_temperature_bracket` returns (`status`, `bracket`,
+        `working_directory`, and `df`/`future` where available).
+    """
+    results: Dict[Any, Dict[str, Any]] = {}
+    pending_idx = list(structures_df.index)
+
+    for _ in range(max_iterations):
+        if not pending_idx:
+            break
+
+        still_pending = []
+        futures_this_round = []
+
+        for idx in pending_idx:
+            result = refine_temperature_bracket(
+                row=structures_df.loc[idx],
+                calphy_parameters=calphy_parameters,
+                potential_df=potential_df,
+                executor=executor,
+                working_directory_root=working_directory_root,
+                initial_bracket=initial_bracket,
+                tolerance=tolerance,
+                step_lower=step_lower,
+                step_upper=step_upper,
+                conc_decimals=conc_decimals,
+            )
+            results[idx] = result
+
+            if result["status"] in ("converged", "incomplete"):
+                continue
+
+            still_pending.append(idx)
+            if "future" in result:
+                futures_this_round.append(result["future"])
+
+        pending_idx = still_pending
+
+        if pending_idx and futures_this_round:
+            wait(futures_this_round, return_when=FIRST_COMPLETED)
+
+    return pd.DataFrame([results[idx] for idx in structures_df.index], index=structures_df.index)
 
 
 def build_criterion_table(

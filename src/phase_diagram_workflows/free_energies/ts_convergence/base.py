@@ -150,3 +150,51 @@ def resolve_current_bracket(
         )
 
     return t_low, t_high
+
+
+def decide_next_bracket(
+    current_bracket: Tuple[float, float],
+    criterion: Optional[float],
+    tolerance: float,
+    step_lower: Optional[float] = None,
+    step_upper: Optional[float] = None,
+) -> Optional[Tuple[float, float]]:
+    """Decide what to do about a bracket, given its criterion (if known).
+
+    Pure decision logic: no executor, no I/O, no submission -- just this
+    tolerance judged against an already-known number. Safe to call as many
+    times as you like with as many different `tolerance` values as you
+    like; it can never trigger, affect, or even see any computation.
+
+    Parameters
+    ----------
+    current_bracket : Tuple[float, float]
+        The `(t_low, t_high)` bracket this decision is about (typically
+        from `resolve_current_bracket`).
+    criterion : Optional[float]
+        The bracket's TI overlap criterion (see `ts_overlap_criterion`), or
+        `None` if it hasn't been computed yet (not yet submitted, or still
+        running).
+    tolerance : float
+        Maximum allowed criterion for `current_bracket` to count as converged.
+    step_lower : Optional[float], optional
+        If given, narrowing raises the lower bound by this amount.
+    step_upper : Optional[float], optional
+        If given, narrowing lowers the upper bound by this amount.
+
+    Returns
+    -------
+    Optional[Tuple[float, float]]
+        `None` if `criterion` is known and within `tolerance` (converged,
+        nothing more to do). Otherwise, the bracket that should be
+        submitted/checked next: `current_bracket` itself if `criterion` is
+        `None` (nothing known about it yet), or a narrower bracket (via
+        `step_bracket`) if `criterion` exceeds `tolerance`.
+    """
+    if criterion is None:
+        return current_bracket
+
+    if criterion <= tolerance:
+        return None
+
+    return step_bracket(current_bracket[0], current_bracket[1], step_lower=step_lower, step_upper=step_upper)

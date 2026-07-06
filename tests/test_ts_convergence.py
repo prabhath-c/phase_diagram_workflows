@@ -22,6 +22,7 @@ from lammpsparser import get_potential_by_name
 
 from phase_diagram_workflows.free_energies.ts_convergence.base import (
     check_ts_overlap,
+    decide_next_bracket,
     resolve_current_bracket,
     step_bracket,
     ts_overlap_criterion,
@@ -30,11 +31,13 @@ from phase_diagram_workflows.free_energies.ts_convergence.ti_binary import (
     _bracket_prefix,
     _bracket_working_directory,
     _find_tried_brackets,
+    auto_refine_temperature_brackets,
     build_criterion_table,
     get_unique_criterion_table,
     plot_criterion_by_bracket,
     plot_criterion_vs_concentration,
     refine_temperature_bracket,
+    submit_bracket,
 )
 
 
@@ -87,6 +90,28 @@ class TestResolveCurrentBracket:
         # gives (600, 500), which is inverted.
         with pytest.raises(ValueError, match="narrowed past each other"):
             resolve_current_bracket((300, 1000), [(600, 1000), (300, 500)])
+
+
+class TestDecideNextBracket:
+    """Pure decision logic: no executor involved anywhere in this class."""
+
+    def test_unknown_criterion_returns_current_bracket_unchanged(self):
+        assert decide_next_bracket((300, 1000), None, tolerance=0.005) == (300, 1000)
+
+    def test_within_tolerance_returns_none(self):
+        assert decide_next_bracket((300, 1000), criterion=0.003, tolerance=0.005) is None
+
+    def test_exceeds_tolerance_returns_narrowed_bracket(self):
+        assert decide_next_bracket(
+            (300, 1000), criterion=0.02, tolerance=0.005, step_upper=100
+        ) == (300, 900)
+
+    def test_same_criterion_different_tolerances_only_changes_the_decision(self):
+        # The exact scenario from the notebook: nothing about the bracket or
+        # its criterion changes -- only the tolerance a human is trying out.
+        current_bracket, criterion = (700.0, 900.0), 0.0212
+        assert decide_next_bracket(current_bracket, criterion, tolerance=0.005, step_upper=100.0) == (700.0, 800.0)
+        assert decide_next_bracket(current_bracket, criterion, tolerance=0.03, step_upper=100.0) is None
 
 
 class TestBracketPrefixAndWorkingDirectory:
@@ -193,6 +218,34 @@ def base_ts_params():
     }
 
 
+class TestSubmitBracket:
+    """submit_bracket takes no tolerance parameter at all -- confirmed here
+    by never passing one, unlike every other test in this file."""
+
+    def test_submits_real_calphy_run_and_writes_to_expected_directory(
+        self, small_structure, potential_df, base_ts_params, tmp_path
+    ):
+        row = _make_row(small_structure, c_in=0.15)
+        executor = EagerExecutor()
+
+        future, working_directory = submit_bracket(
+            row=row,
+            bracket=(700.0, 720.0),
+            calphy_parameters=base_ts_params,
+            potential_df=potential_df,
+            executor=executor,
+            working_directory_root=str(tmp_path),
+        )
+
+        assert working_directory == _bracket_working_directory(
+            str(tmp_path), _bracket_prefix(row), 700.0, 720.0
+        )
+        assert future.done()
+        _, df = future.result()
+        assert bool(df.iloc[0]["status"])
+        assert executor.submit_calls[0]["calphy_parameters"]["temperature"] == [700.0, 720.0]
+
+
 class TestRefineTemperatureBracketReal:
     def test_converges_with_generous_tolerance(self, small_structure, potential_df, base_ts_params, tmp_path):
         row = _make_row(small_structure, c_in=0.1)
@@ -263,6 +316,85 @@ class TestRefineTemperatureBracketReal:
             assert result["status"] == "pending"
         finally:
             executor.shutdown(wait=True)
+
+
+class TestAutoRefineTemperatureBrackets:
+    def test_all_rows_converge_in_first_round(self, small_structure, potential_df, base_ts_params, tmp_path):
+        structures_df = pd.DataFrame([
+            _make_row(small_structure, c_in=0.1),
+            _make_row(small_structure, c_in=0.2),
+        ])
+
+        result_df = auto_refine_temperature_brackets(
+            structures_df=structures_df,
+            calphy_parameters=base_ts_params,
+            potential_df=potential_df,
+            executor=EagerExecutor(),
+            working_directory_root=str(tmp_path),
+            initial_bracket=(700.0, 720.0),
+            tolerance=1.0,  # generous: converges immediately
+            step_upper=10.0,
+            max_iterations=10,
+        )
+
+        assert list(result_df.index) == list(structures_df.index)
+        assert (result_df["status"] == "converged").all()
+        assert (result_df["bracket"] == (700.0, 720.0)).all()
+
+    def test_gives_up_after_max_iterations_without_raising(
+        self, small_structure, potential_df, base_ts_params, tmp_path
+    ):
+        structures_df = pd.DataFrame([_make_row(small_structure, c_in=0.3)])
+
+        result_df = auto_refine_temperature_brackets(
+            structures_df=structures_df,
+            calphy_parameters=base_ts_params,
+            potential_df=potential_df,
+            executor=EagerExecutor(),
+            working_directory_root=str(tmp_path),
+            initial_bracket=(700.0, 740.0),
+            tolerance=1e-12,  # unreachable: never converges
+            step_upper=10.0,
+            max_iterations=2,
+        )
+
+        row = result_df.iloc[0]
+        assert row["status"] == "resubmitted"  # gave up, didn't raise
+        # 2 rounds: round 0 narrows (700,740)->(700,730); round 1 narrows
+        # (700,730)->(700,720) and stops there without a 3rd round.
+        assert row["bracket"] == (700.0, 720.0)
+
+    def test_independent_rows_progress_concurrently(self, small_structure, potential_df, base_ts_params, tmp_path):
+        # One row converges immediately; the other needs one narrowing step.
+        # Both should be driven in the same call, not one-at-a-time.
+        structures_df = pd.DataFrame([
+            _make_row(small_structure, c_in=0.4),
+            _make_row(small_structure, c_in=0.5),
+        ])
+
+        calls = []
+
+        class RecordingEagerExecutor(EagerExecutor):
+            def submit(self, fn, **kwargs):
+                calls.append(kwargs["working_directory"])
+                return super().submit(fn, **kwargs)
+
+        result_df = auto_refine_temperature_brackets(
+            structures_df=structures_df,
+            calphy_parameters=base_ts_params,
+            potential_df=potential_df,
+            executor=RecordingEagerExecutor(),
+            working_directory_root=str(tmp_path),
+            initial_bracket=(700.0, 720.0),
+            tolerance=1.0,
+            step_upper=10.0,
+            max_iterations=10,
+        )
+
+        assert (result_df["status"] == "converged").all()
+        # Both rows' initial brackets were submitted in the same (first) round.
+        assert sum("0.400000" in c for c in calls) >= 1
+        assert sum("0.500000" in c for c in calls) >= 1
 
 
 @pytest.fixture(scope="module")
