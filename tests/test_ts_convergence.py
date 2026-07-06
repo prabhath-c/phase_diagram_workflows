@@ -13,11 +13,12 @@ matplotlib.use("Agg")
 
 import os
 import tempfile
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 
 import pandas as pd
 import pytest
 from ase.build import bulk
+from executorlib import SingleNodeExecutor
 from lammpsparser import get_potential_by_name
 
 from phase_diagram_workflows.free_energies.ts_convergence.base import (
@@ -182,6 +183,20 @@ class EagerExecutor:
         return future
 
 
+class _NeverDoneExecutor:
+    """Submits nothing real: returns a Future that never completes.
+
+    Demonstrates that "pending" is entirely a disk-state question:
+    refine_temperature_bracket never inspects the executor's Future at all
+    (not even `.done()`), so an executor this deliberately unhelpful still
+    produces the exact same "pending" result as a real one -- what matters
+    is only whether a result exists on disk yet.
+    """
+
+    def submit(self, fn, **kwargs):
+        return Future()
+
+
 def _make_row(atoms, c_in=0.1, phase_type="fcc", reference_phase="solid"):
     return pd.Series({
         "main_element": "Al", "mixing_element": "Mg",
@@ -247,7 +262,13 @@ class TestSubmitBracket:
 
 
 class TestRefineTemperatureBracketReal:
-    def test_converges_with_generous_tolerance(self, small_structure, potential_df, base_ts_params, tmp_path):
+    def test_first_call_always_submits_and_reports_pending(
+        self, small_structure, potential_df, base_ts_params, tmp_path
+    ):
+        # Nothing on disk yet, so the very first call can only submit
+        # fire-and-forget and report "pending" -- regardless of how fast
+        # the executor happens to run the work underneath it, since this
+        # function never checks the executor's Future at all.
         row = _make_row(small_structure, c_in=0.1)
         executor = EagerExecutor()
 
@@ -262,31 +283,58 @@ class TestRefineTemperatureBracketReal:
             step_upper=10.0,
         )
 
-        assert result["status"] == "converged"
+        assert result["status"] == "pending"
         assert result["bracket"] == (700.0, 720.0)
         assert len(executor.submit_calls) == 1
+
+    def test_converges_on_the_call_after_submission(self, small_structure, potential_df, base_ts_params, tmp_path):
+        row = _make_row(small_structure, c_in=0.1)
+        executor = EagerExecutor()
+
+        refine_temperature_bracket(
+            row=row, calphy_parameters=base_ts_params, potential_df=potential_df,
+            executor=executor, working_directory_root=str(tmp_path),
+            initial_bracket=(700.0, 720.0), tolerance=1.0, step_upper=10.0,
+        )
+        # By now the (eagerly-executed) real result is on disk; a second
+        # call reads it directly rather than touching the executor again.
+        result = refine_temperature_bracket(
+            row=row, calphy_parameters=base_ts_params, potential_df=potential_df,
+            executor=executor, working_directory_root=str(tmp_path),
+            initial_bracket=(700.0, 720.0), tolerance=1.0, step_upper=10.0,
+        )
+
+        assert result["status"] == "converged"
+        assert result["bracket"] == (700.0, 720.0)
 
     def test_resubmits_then_resolves_narrowed_bracket_on_next_call(
         self, small_structure, potential_df, base_ts_params, tmp_path
     ):
         row = _make_row(small_structure, c_in=0.2)
+        executor = EagerExecutor()
+        tolerance = -1.0  # deterministically unreachable (criterion is abs(...), always >= 0)
 
         first = refine_temperature_bracket(
-            row=row,
-            calphy_parameters=base_ts_params,
-            potential_df=potential_df,
-            executor=EagerExecutor(),
-            working_directory_root=str(tmp_path),
-            initial_bracket=(700.0, 720.0),
-            tolerance=1e-8,  # unreachable: forces resubmission
-            step_upper=10.0,
+            row=row, calphy_parameters=base_ts_params, potential_df=potential_df,
+            executor=executor, working_directory_root=str(tmp_path),
+            initial_bracket=(700.0, 720.0), tolerance=tolerance, step_upper=10.0,
         )
-        assert first["status"] == "resubmitted"
-        assert first["bracket"] == (700.0, 710.0)
+        assert first["status"] == "pending"
+        assert first["bracket"] == (700.0, 720.0)
 
-        # Fresh call (simulating a new session): should resolve straight to
-        # the narrowed bracket already on disk, not restart from (700, 720).
+        # (700, 720) is now on disk; this call reads it, doesn't converge,
+        # and fires off the narrower bracket.
         second = refine_temperature_bracket(
+            row=row, calphy_parameters=base_ts_params, potential_df=potential_df,
+            executor=executor, working_directory_root=str(tmp_path),
+            initial_bracket=(700.0, 720.0), tolerance=tolerance, step_upper=10.0,
+        )
+        assert second["status"] == "resubmitted"
+        assert second["bracket"] == (700.0, 710.0)
+
+        # Fresh call (simulating a new session, generous tolerance now):
+        # should resolve straight to the narrowed bracket already on disk.
+        third = refine_temperature_bracket(
             row=row,
             calphy_parameters=base_ts_params,
             potential_df=potential_df,
@@ -296,26 +344,29 @@ class TestRefineTemperatureBracketReal:
             tolerance=1.0,
             step_upper=10.0,
         )
-        assert second["bracket"] == (700.0, 710.0)
-        assert second["status"] == "converged"
+        assert third["bracket"] == (700.0, 710.0)
+        assert third["status"] == "converged"
 
-    def test_pending_with_real_background_executor(self, small_structure, potential_df, base_ts_params, tmp_path):
+    def test_pending_regardless_of_what_the_executor_does(
+        self, small_structure, potential_df, base_ts_params, tmp_path
+    ):
+        # Nothing on disk yet -- "pending" holds even for an executor that
+        # will never actually finish, since this function never inspects
+        # the Future it gets back.
         row = _make_row(small_structure, c_in=0.3)
-        executor = ThreadPoolExecutor(max_workers=1)
-        try:
-            result = refine_temperature_bracket(
-                row=row,
-                calphy_parameters=base_ts_params,
-                potential_df=potential_df,
-                executor=executor,
-                working_directory_root=str(tmp_path),
-                initial_bracket=(700.0, 720.0),
-                tolerance=1.0,
-                step_upper=10.0,
-            )
-            assert result["status"] == "pending"
-        finally:
-            executor.shutdown(wait=True)
+
+        result = refine_temperature_bracket(
+            row=row,
+            calphy_parameters=base_ts_params,
+            potential_df=potential_df,
+            executor=_NeverDoneExecutor(),
+            working_directory_root=str(tmp_path),
+            initial_bracket=(700.0, 720.0),
+            tolerance=1.0,
+            step_upper=10.0,
+        )
+        assert result["status"] == "pending"
+        assert result["bracket"] == (700.0, 720.0)
 
 
 class TestAutoRefineTemperatureBrackets:
@@ -360,8 +411,8 @@ class TestAutoRefineTemperatureBrackets:
 
         row = result_df.iloc[0]
         assert row["status"] == "resubmitted"  # gave up, didn't raise
-        # 2 rounds: round 0 narrows (700,740)->(700,730); round 1 narrows
-        # (700,730)->(700,720) and stops there without a 3rd round.
+        # max_iterations=2 narrowing attempts for this row: (700,740)->(700,730)
+        # on the first, (700,730)->(700,720) on the second, then it stops.
         assert row["bracket"] == (700.0, 720.0)
 
     def test_independent_rows_progress_concurrently(self, small_structure, potential_df, base_ts_params, tmp_path):
@@ -397,6 +448,69 @@ class TestAutoRefineTemperatureBrackets:
         assert sum("0.500000" in c for c in calls) >= 1
 
 
+class TestAutoRefineTemperatureBracketsRealExecutor:
+    """Uses executorlib's own SingleNodeExecutor -- a genuine async executor
+    with a real background thread and real on-disk caching -- instead of the
+    synchronous EagerExecutor stand-in used everywhere else in this file.
+
+    EagerExecutor runs the real calphy calculation, but *synchronously*
+    inside submit(), so it can never exercise the "submitted now, resolves
+    later via a background thread" timing that a real executorlib executor
+    has. That gap is exactly what let the "checking .done() immediately"
+    bug slip through untested before. This test closes it.
+    """
+
+    def test_converges_with_real_async_executor(self, small_structure, potential_df, base_ts_params, tmp_path):
+        structures_df = pd.DataFrame([_make_row(small_structure, c_in=0.6)])
+        cache_directory = str(tmp_path / "cache")
+        working_directory_root = str(tmp_path / "work")
+
+        executor = SingleNodeExecutor(cache_directory=cache_directory, max_cores=1)
+        try:
+            result_df = auto_refine_temperature_brackets(
+                structures_df=structures_df,
+                calphy_parameters=base_ts_params,
+                potential_df=potential_df,
+                executor=executor,
+                working_directory_root=working_directory_root,
+                initial_bracket=(700.0, 720.0),
+                tolerance=1.0,  # generous: converges on the first real result
+                step_upper=10.0,
+                max_iterations=5,
+            )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=False)
+
+        row = result_df.iloc[0]
+        assert row["status"] == "converged"
+        assert row["bracket"] == (700.0, 720.0)
+
+    def test_narrows_with_real_async_executor(self, small_structure, potential_df, base_ts_params, tmp_path):
+        structures_df = pd.DataFrame([_make_row(small_structure, c_in=0.7)])
+        cache_directory = str(tmp_path / "cache")
+        working_directory_root = str(tmp_path / "work")
+
+        executor = SingleNodeExecutor(cache_directory=cache_directory, max_cores=1)
+        try:
+            result_df = auto_refine_temperature_brackets(
+                structures_df=structures_df,
+                calphy_parameters=base_ts_params,
+                potential_df=potential_df,
+                executor=executor,
+                working_directory_root=working_directory_root,
+                initial_bracket=(700.0, 720.0),
+                tolerance=-1.0,  # deterministically unreachable
+                step_upper=10.0,
+                max_iterations=1,
+            )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=False)
+
+        row = result_df.iloc[0]
+        assert row["status"] == "resubmitted"
+        assert row["bracket"] == (700.0, 710.0)
+
+
 @pytest.fixture(scope="module")
 def criterion_sweep(small_structure, potential_df, tmp_path_factory):
     """Runs one real, small sweep: one concentration that converges
@@ -423,26 +537,35 @@ def criterion_sweep(small_structure, potential_df, tmp_path_factory):
         _make_row(small_structure, c_in=0.2),
     ])
 
-    refine_temperature_bracket(
-        row=structures_df.iloc[0],
-        calphy_parameters=base_params,
-        potential_df=potential_df,
-        executor=EagerExecutor(),
-        working_directory_root=working_directory_root,
-        initial_bracket=(700.0, 720.0),
-        tolerance=1.0,  # converges immediately
-        step_upper=10.0,
-    )
-    refine_temperature_bracket(
-        row=structures_df.iloc[1],
-        calphy_parameters=base_params,
-        potential_df=potential_df,
-        executor=EagerExecutor(),
-        working_directory_root=working_directory_root,
-        initial_bracket=(700.0, 720.0),
-        tolerance=1e-8,  # forces exactly one resubmission
-        step_upper=10.0,
-    )
+    # Two calls each: the first only submits (nothing on disk yet, so it can
+    # only report "pending"); the second reads the now-available result and
+    # decides converged/resubmitted.
+    executor0 = EagerExecutor()
+    for _ in range(2):
+        refine_temperature_bracket(
+            row=structures_df.iloc[0],
+            calphy_parameters=base_params,
+            potential_df=potential_df,
+            executor=executor0,
+            working_directory_root=working_directory_root,
+            initial_bracket=(700.0, 720.0),
+            tolerance=1.0,  # converges immediately once checked
+            step_upper=10.0,
+        )
+
+    executor1 = EagerExecutor()
+    for _ in range(2):
+        refine_temperature_bracket(
+            row=structures_df.iloc[1],
+            calphy_parameters=base_params,
+            potential_df=potential_df,
+            executor=executor1,
+            working_directory_root=working_directory_root,
+            initial_bracket=(700.0, 720.0),
+            # Negative: deterministically unreachable (criterion is abs(...), always >= 0).
+            tolerance=-1.0,
+            step_upper=10.0,
+        )
 
     return structures_df, working_directory_root
 

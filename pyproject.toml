@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "black", "ruff", "mypy"]
+dev = ["pytest", "pytest-cov", "black", "ruff", "mypy", "matplotlib", "executorlib>=1.0.0", "pylammpsmpi>=0.1.0"]
 executor = ["executorlib>=1.0.0", "pylammpsmpi>=0.1.0"]
 plotting = ["matplotlib"]
 

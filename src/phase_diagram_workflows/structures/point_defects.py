@@ -60,6 +60,8 @@ def generate_random_binary_structures(
         main_indices = np.where(symbols_orig == main_element)[0]
         mix_indices = np.where(symbols_orig == mixing_element)[0]
 
+        approx = list(approximations)
+
         if 'antisites' in approximations:
             if delta_n > 0:
                 # Need to substitute main_element → mixing_element

@@ -4,7 +4,9 @@ import os
 from concurrent.futures import FIRST_COMPLETED, wait
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
+import yaml
 
 try:
     import matplotlib.pyplot as plt
@@ -152,14 +154,20 @@ def refine_temperature_bracket(
 
     Orchestrates two purpose-separated pieces: `submit_bracket` (executor
     plumbing, no tolerance) and `decide_next_bracket` (tolerance-based
-    decision, no executor). Stateless, and safe to resubmit unconditionally:
-    recomputes the current bracket from whatever brackets have already been
-    attempted on disk (see `_find_tried_brackets`), then always calls
-    `executor.submit`. With a caching executor (e.g. executorlib's
-    `cache_directory`), submitting an already-finished bracket again is
-    idempotent -- the cached result is returned without rerunning anything.
-    A plain, non-caching executor (e.g. `concurrent.futures.ThreadPoolExecutor`)
-    will instead redo the same computation; still correct, just not free.
+    decision, no executor). Stateless: recomputes the current bracket from
+    whatever brackets have already been attempted on disk (see
+    `_find_tried_brackets`).
+
+    Deliberately never inspects the executor's `Future` at all -- not even
+    `.done()`. executorlib's own background thread needs real wall-clock
+    time to notice a result, even one that's already fully cached on disk,
+    so checking `.done()` immediately after `.submit()` is always False
+    regardless of whether the work is actually finished; it is not a
+    meaningful signal. The only reliable, synchronous source of truth is
+    disk state itself: if `gather_calphy_results_detailed` can already read
+    a result for the current bracket, it's done; if not, this (re)submits it
+    fire-and-forget (matching executorlib's documented disconnect pattern)
+    and expects to be called again later, whenever that is.
 
     Parameters
     ----------
@@ -195,31 +203,32 @@ def refine_temperature_bracket(
     -------
     Dict[str, Any]
         `status` is one of:
-        - "pending": the submitted future hasn't completed yet.
-        - "incomplete": the future completed but forward/backward TI data
-          isn't available (e.g. still running under the hood, or fe mode).
+        - "pending": no result on disk yet for the current bracket; it was
+          just (re)submitted fire-and-forget. Call again later to check.
+        - "incomplete": a result exists but forward/backward TI data isn't
+          available (e.g. fe mode).
         - "converged": forward/backward overlap within tolerance.
-        - "resubmitted": did not converge; a narrower bracket was submitted.
-        Also includes `bracket`, `working_directory`, and (when available)
-        `df` and `future`.
+        - "resubmitted": did not converge; a narrower bracket was submitted
+          fire-and-forget. Call again later to check on it.
+        Also includes `bracket`, `working_directory`, and (when available) `df`.
     """
     prefix = _bracket_prefix(row, conc_decimals=conc_decimals)
     tried_brackets = _find_tried_brackets(working_directory_root, prefix)
     current_bracket = resolve_current_bracket(initial_bracket, tried_brackets)
+    working_directory = _bracket_working_directory(working_directory_root, prefix, current_bracket[0], current_bracket[1])
 
-    future, working_directory = submit_bracket(
-        row, current_bracket, calphy_parameters, potential_df, executor, working_directory_root, conc_decimals
-    )
-
-    if not future.done():
+    try:
+        df = gather_calphy_results_detailed(working_directory)
+    except FileNotFoundError:
+        submit_bracket(
+            row, current_bracket, calphy_parameters, potential_df, executor, working_directory_root, conc_decimals
+        )
         return {
             "status": "pending",
             "bracket": current_bracket,
             "working_directory": working_directory,
-            "future": future,
         }
 
-    _, df = future.result()
     result_row = df.iloc[0]
     forward = result_row["forward_energy_diff"]
     backward = result_row["backward_energy_diff"]
@@ -243,7 +252,8 @@ def refine_temperature_bracket(
             "df": df,
         }
 
-    new_future, new_working_directory = submit_bracket(
+    new_working_directory = _bracket_working_directory(working_directory_root, prefix, next_bracket[0], next_bracket[1])
+    submit_bracket(
         row, next_bracket, calphy_parameters, potential_df, executor, working_directory_root, conc_decimals
     )
 
@@ -252,7 +262,6 @@ def refine_temperature_bracket(
         "bracket": next_bracket,
         "working_directory": new_working_directory,
         "df": df,
-        "future": new_future,
     }
 
 
@@ -271,24 +280,26 @@ def auto_refine_temperature_brackets(
 ) -> pd.DataFrame:
     """Drive every row of a structures DataFrame to convergence automatically.
 
-    Unlike `refine_temperature_bracket`, which never blocks and expects to
-    be called again by hand whenever you want to check in, this blocks: it
-    repeatedly calls `refine_temperature_bracket` for every row that hasn't
-    converged yet, waits for at least one of their jobs to finish before
-    checking again, and keeps going until every row is "converged"/
-    "incomplete" or `max_iterations` check-in rounds have passed.
+    Unlike `refine_temperature_bracket`, which never touches the executor's
+    `Future` and expects to be called again by hand whenever you want to
+    check in, this blocks for real completion using the pattern executorlib
+    is actually designed around: submit, then call `.result()`, never poll
+    `.done()` immediately after submitting.
 
-    All rows are driven concurrently rather than one at a time -- each
-    round submits/reconnects every still-unconverged row before waiting, so
-    independent concentrations progress through SLURM in parallel instead
-    of blocking on one row's full narrowing history before starting the next.
+    Rows progress fully independently of each other: every row is submitted
+    once up front, and then, using `wait(..., return_when=FIRST_COMPLETED)`,
+    whichever row's job finishes first is immediately decided and (if not
+    converged) resubmitted on its own -- every other row's job keeps running
+    untouched in the background. A row never waits on a sibling it has no
+    working-directory/cache relationship with; `max_iterations` is a per-row
+    cap on narrowing attempts, not a global round count.
 
     `tolerance` here doesn't have to be right: nothing on disk is ever
     destroyed, and every attempted bracket stays inspectable via
-    `build_criterion_table` regardless of what this function decided. A
-    row that never converges within `max_iterations` just keeps its last
-    status (e.g. still "resubmitted", with its narrowest bracket left
-    running) -- this does not raise, it simply stops waiting on that row.
+    `build_criterion_table` regardless of what this function decided. A row
+    that never converges within `max_iterations` just keeps its last status
+    (still "resubmitted", with its narrowest bracket left running) -- this
+    does not raise, it simply stops resubmitting that row.
 
     Parameters
     ----------
@@ -296,56 +307,95 @@ def auto_refine_temperature_brackets(
         Structures DataFrame, one row per concentration/phase.
     calphy_parameters, potential_df, executor, working_directory_root,
     initial_bracket, tolerance, step_lower, step_upper, conc_decimals :
-        Passed straight through to `refine_temperature_bracket` for every row.
+        Same meaning as in `refine_temperature_bracket`.
     max_iterations : int, optional
-        Maximum number of check-in rounds across all rows before giving up
-        on whichever rows still haven't converged. Guards against both a
-        tolerance that's unreachable (endless narrowing) and a job that
-        never leaves the SLURM queue (endless waiting on the same future).
+        Maximum number of narrowing attempts *per row* before giving up on
+        that row specifically. Guards against a tolerance that's unreachable
+        for that particular concentration (endless narrowing).
 
     Returns
     -------
     pd.DataFrame
-        One row per input row (same index), with the same columns
-        `refine_temperature_bracket` returns (`status`, `bracket`,
-        `working_directory`, and `df`/`future` where available).
+        One row per input row (same index), with columns `status`
+        (`"converged"`, `"incomplete"`, or `"resubmitted"` if
+        `max_iterations` was reached first), `bracket`, `working_directory`,
+        and `df` where available.
     """
     results: Dict[Any, Dict[str, Any]] = {}
-    pending_idx = list(structures_df.index)
+    current_bracket_by_idx: Dict[Any, Tuple[float, float]] = {}
+    iterations_by_idx: Dict[Any, int] = {idx: 0 for idx in structures_df.index}
+    future_to_idx: Dict[Any, Any] = {}
 
-    for _ in range(max_iterations):
-        if not pending_idx:
-            break
+    for idx in structures_df.index:
+        row = structures_df.loc[idx]
+        prefix = _bracket_prefix(row, conc_decimals=conc_decimals)
+        tried_brackets = _find_tried_brackets(working_directory_root, prefix)
+        current_bracket_by_idx[idx] = resolve_current_bracket(initial_bracket, tried_brackets)
+        future, _ = submit_bracket(
+            row, current_bracket_by_idx[idx], calphy_parameters, potential_df,
+            executor, working_directory_root, conc_decimals,
+        )
+        future_to_idx[future] = idx
 
-        still_pending = []
-        futures_this_round = []
+    while future_to_idx:
+        done, _ = wait(list(future_to_idx.keys()), return_when=FIRST_COMPLETED)
 
-        for idx in pending_idx:
-            result = refine_temperature_bracket(
-                row=structures_df.loc[idx],
-                calphy_parameters=calphy_parameters,
-                potential_df=potential_df,
-                executor=executor,
-                working_directory_root=working_directory_root,
-                initial_bracket=initial_bracket,
-                tolerance=tolerance,
-                step_lower=step_lower,
-                step_upper=step_upper,
-                conc_decimals=conc_decimals,
+        for future in done:
+            idx = future_to_idx.pop(future)
+            row = structures_df.loc[idx]
+            prefix = _bracket_prefix(row, conc_decimals=conc_decimals)
+            current_bracket = current_bracket_by_idx[idx]
+            working_directory = _bracket_working_directory(
+                working_directory_root, prefix, current_bracket[0], current_bracket[1]
             )
-            results[idx] = result
 
-            if result["status"] in ("converged", "incomplete"):
+            _, df = future.result()
+            result_row = df.iloc[0]
+            forward = result_row["forward_energy_diff"]
+            backward = result_row["backward_energy_diff"]
+
+            if forward is None or backward is None:
+                results[idx] = {
+                    "status": "incomplete",
+                    "bracket": current_bracket,
+                    "working_directory": working_directory,
+                    "df": df,
+                }
                 continue
 
-            still_pending.append(idx)
-            if "future" in result:
-                futures_this_round.append(result["future"])
+            criterion = ts_overlap_criterion(forward[0], backward[0])
+            next_bracket = decide_next_bracket(
+                current_bracket, criterion, tolerance, step_lower=step_lower, step_upper=step_upper
+            )
 
-        pending_idx = still_pending
+            if next_bracket is None:
+                results[idx] = {
+                    "status": "converged",
+                    "bracket": current_bracket,
+                    "working_directory": working_directory,
+                    "df": df,
+                }
+                continue
 
-        if pending_idx and futures_this_round:
-            wait(futures_this_round, return_when=FIRST_COMPLETED)
+            new_working_directory = _bracket_working_directory(
+                working_directory_root, prefix, next_bracket[0], next_bracket[1]
+            )
+            results[idx] = {
+                "status": "resubmitted",
+                "bracket": next_bracket,
+                "working_directory": new_working_directory,
+            }
+
+            iterations_by_idx[idx] += 1
+            if iterations_by_idx[idx] >= max_iterations:
+                continue  # give up on this row alone; its last submission keeps running
+
+            current_bracket_by_idx[idx] = next_bracket
+            new_future, _ = submit_bracket(
+                row, next_bracket, calphy_parameters, potential_df,
+                executor, working_directory_root, conc_decimals,
+            )
+            future_to_idx[new_future] = idx
 
     return pd.DataFrame([results[idx] for idx in structures_df.index], index=structures_df.index)
 
@@ -397,7 +447,10 @@ def build_criterion_table(
                 backward = result_row["backward_energy_diff"]
                 if forward is not None and backward is not None:
                     criterion = ts_overlap_criterion(forward[0], backward[0])
-            except FileNotFoundError:
+            except (FileNotFoundError, ValueError, KeyError, yaml.YAMLError):
+                # A job still writing (or with truncated/corrupted) output can
+                # fail to parse; treat it the same as "not available yet"
+                # rather than crashing the whole table build.
                 pass
 
             records.append({
@@ -442,7 +495,14 @@ def get_unique_criterion_table(
     for _, group in criterion_table.groupby(_IDENTITY_COLUMNS):
         tried_brackets = list(zip(group["t_low"], group["t_high"]))
         current = resolve_current_bracket(initial_bracket, tried_brackets)
-        match = group[(group["t_low"] == current[0]) & (group["t_high"] == current[1])]
+        # Approximate equality: t_low/t_high round-trip through the .2f
+        # directory-naming format, so a current bracket combined from an
+        # unrounded initial_bracket can differ from the table's parsed
+        # values in the last decimal without being a genuinely different bracket.
+        match = group[
+            np.isclose(group["t_low"], current[0], atol=0.005)
+            & np.isclose(group["t_high"], current[1], atol=0.005)
+        ]
         if match.empty:
             # Bounds were narrowed independently across attempts, so no single
             # attempt matches the combined bracket -- fall back to the
