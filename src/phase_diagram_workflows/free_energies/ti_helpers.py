@@ -9,7 +9,6 @@ from contextlib import contextmanager
 import pandas as pd
 from pydantic import ValidationError
 from lammpsparser import write_lammps_structure
-from ruamel.yaml import YAML
 
 def _validate_input_structure(structure: Atoms) -> None:
     """Validate that input structure is not empty.
@@ -102,37 +101,6 @@ def _working_directory_context(path: str):
         yield
     finally:
         os.chdir(prev_cwd)
-
-def _save_calphy_input_yaml(
-    input_class: Calculation,
-    folder_name: str,
-    file_name: str = "my_input_file.yaml"
-) -> None:
-    """Save calphy Calculation object to YAML input file.
-    
-    Exports the calphy Calculation configuration to a YAML file that can be
-    used directly with calphy command-line tools.
-    
-    Parameters
-    ----------
-    input_class : Calculation
-        Calphy Calculation object to serialize
-    folder_name : str
-        Directory where YAML file will be written
-    file_name : str, optional
-        Name of the output YAML file (default: 'my_input_file.yaml')
-        
-    Returns
-    -------
-    None
-    """
-    yaml = YAML()
-    yaml.indent(mapping=2, sequence=2)
-
-    input_data = {"calculations": [input_class.model_dump()]}
-    output_path = os.path.join(folder_name, file_name)
-    with open(output_path, "w") as fout:
-        yaml.dump(input_data, fout)
 
 def _write_structure(
     structure: Atoms,

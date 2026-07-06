@@ -12,7 +12,6 @@ import pandas as pd
 
 from phase_diagram_workflows.free_energies.ti_helpers import (
     _working_directory_context,
-    _save_calphy_input_yaml,
     _build_calphy_config,
     _validate_input_structure,
     _validate_potential_df,
@@ -172,8 +171,8 @@ def gather_calphy_results_detailed(working_directory: str) -> pd.DataFrame:
             data["free_energy_error"] = ferr
         else:
             data["temperature"] = np.asarray(inp["temperature"], dtype=float)
-            data["free_energy"] = np.nan
-            data["free_energy_error"] = np.nan
+            data["free_energy"] = np.full_like(data["temperature"], np.nan)
+            data["free_energy_error"] = np.full_like(data["temperature"], np.nan)
 
         f_ediffs: List[np.ndarray] = []
         b_ediffs: List[np.ndarray] = []
@@ -183,7 +182,7 @@ def gather_calphy_results_detailed(working_directory: str) -> pd.DataFrame:
         while True:
             fwdfile = os.path.join(wd, f"ts.forward_{i}.dat")
             bkdfile = os.path.join(wd, f"ts.backward_{i}.dat")
-            if not os.path.exists(fwdfile):
+            if not (os.path.exists(fwdfile) and os.path.exists(bkdfile)):
                 break
             fdx, _fp, _fvol, flambda = np.loadtxt(fwdfile, unpack=True, comments="#")
             bdx, _bp, _bvol, blambda = np.loadtxt(bkdfile, unpack=True, comments="#")
@@ -201,7 +200,7 @@ def gather_calphy_results_detailed(working_directory: str) -> pd.DataFrame:
     else:  # fe mode
         data["temperature"] = inp["temperature"]
         data["free_energy"] = rep["results"]["free_energy"] if rep else np.nan
-        data["free_energy_error"] = 0.0
+        data["free_energy_error"] = 0.0 if rep else np.nan
         data["forward_energy_diff"] = None
         data["backward_energy_diff"] = None
         data["forward_lambda"] = None
@@ -311,11 +310,6 @@ def calc_free_energy_with_calphy(
                 calphy_parameters=calphy_parameters,
                 working_directory=working_directory
             )
-
-            # _save_calphy_input_yaml(
-            #     input_class=input_class,
-            #     folder_name=working_directory
-            # )
 
             _run_calphy(input_class=input_class, lmp=lmp)
 

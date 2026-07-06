@@ -8,7 +8,9 @@ import pytest
 import tempfile
 import os
 from unittest.mock import Mock, patch
+import numpy as np
 import pandas as pd
+import yaml
 from ase.atoms import Atoms
 from ase.build import bulk
 
@@ -18,6 +20,115 @@ from phase_diagram_workflows.free_energies.ti_helpers import (
     _validate_calphy_parameters,
     _working_directory_context,
 )
+from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
+
+
+def _write_input_file_yaml(wd, mode="ts", reference_phase="solid", pressure=0.0, temperature=(300.0, 400.0)):
+    inp = {"calculations": [{
+        "mode": mode,
+        "reference_phase": reference_phase,
+        "pressure": pressure,
+        "temperature": list(temperature),
+    }]}
+    with open(os.path.join(wd, "input_file.yaml"), "w") as f:
+        yaml.safe_dump(inp, f)
+
+
+def _write_report_yaml(wd, elements="Al", concentrations="1.0", free_energy=-3.5):
+    rep = {
+        "input": {"element": elements, "concentration": concentrations},
+        "results": {"free_energy": free_energy},
+    }
+    with open(os.path.join(wd, "report.yaml"), "w") as f:
+        yaml.safe_dump(rep, f)
+
+
+def _write_temperature_sweep(wd, n=5):
+    t = np.linspace(300.0, 400.0, n)
+    fe = np.linspace(-3.5, -3.4, n)
+    ferr = np.zeros(n)
+    np.savetxt(os.path.join(wd, "temperature_sweep.dat"), np.column_stack([t, fe, ferr]))
+
+
+def _write_ts_pair(wd, index=1, n=5):
+    dx = np.linspace(0.1, 0.2, n)
+    p = np.zeros(n)
+    vol = np.ones(n)
+    lam = np.linspace(1.0, 0.5, n)
+    np.savetxt(os.path.join(wd, f"ts.forward_{index}.dat"), np.column_stack([dx, p, vol, lam]))
+    np.savetxt(os.path.join(wd, f"ts.backward_{index}.dat"), np.column_stack([dx, p, vol, lam]))
+
+
+class TestGatherCalphyResultsDetailed:
+    """Tests for gather_calphy_results_detailed() edge cases in its own parsing logic"""
+
+    def test_missing_input_file_raises(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with pytest.raises(FileNotFoundError, match="input_file.yaml"):
+                gather_calphy_results_detailed(tmpdir)
+
+    def test_missing_report_yaml(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_input_file_yaml(tmpdir)
+            df = gather_calphy_results_detailed(tmpdir)
+            row = df.iloc[0]
+            assert bool(row["status"]) is False
+            assert row["composition"] is None
+
+    def test_missing_temperature_sweep_falls_back_to_nan_arrays(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_input_file_yaml(tmpdir, temperature=(300.0, 400.0))
+            _write_report_yaml(tmpdir)
+            df = gather_calphy_results_detailed(tmpdir)
+            row = df.iloc[0]
+            assert len(row["free_energy"]) == len(row["temperature"])
+            assert len(row["free_energy_error"]) == len(row["temperature"])
+            assert np.all(np.isnan(row["free_energy"]))
+            assert np.all(np.isnan(row["free_energy_error"]))
+
+    def test_partial_ts_pair_missing_backward_stops_gathering(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_input_file_yaml(tmpdir)
+            _write_report_yaml(tmpdir)
+            _write_temperature_sweep(tmpdir)
+            # Only the forward file for iteration 1 exists, backward is missing.
+            dx = np.linspace(0.1, 0.2, 5)
+            np.savetxt(
+                os.path.join(tmpdir, "ts.forward_1.dat"),
+                np.column_stack([dx, np.zeros(5), np.ones(5), np.linspace(1.0, 0.5, 5)]),
+            )
+            df = gather_calphy_results_detailed(tmpdir)
+            row = df.iloc[0]
+            assert row["forward_energy_diff"] is None
+            assert row["backward_energy_diff"] is None
+
+    def test_ts_forward_backward_pairs_are_read(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_input_file_yaml(tmpdir)
+            _write_report_yaml(tmpdir)
+            _write_temperature_sweep(tmpdir)
+            _write_ts_pair(tmpdir, index=1)
+            df = gather_calphy_results_detailed(tmpdir)
+            row = df.iloc[0]
+            assert len(row["forward_energy_diff"]) == 1
+            assert len(row["backward_energy_diff"]) == 1
+
+    def test_fe_mode_missing_report_gives_nan_error_not_zero(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_input_file_yaml(tmpdir, mode="fe", temperature=(300.0,))
+            df = gather_calphy_results_detailed(tmpdir)
+            row = df.iloc[0]
+            assert np.isnan(row["free_energy"])
+            assert np.isnan(row["free_energy_error"])
+
+    def test_fe_mode_with_report_gives_zero_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_input_file_yaml(tmpdir, mode="fe", temperature=(300.0,))
+            _write_report_yaml(tmpdir, free_energy=-3.45)
+            df = gather_calphy_results_detailed(tmpdir)
+            row = df.iloc[0]
+            assert row["free_energy"] == -3.45
+            assert row["free_energy_error"] == 0.0
 
 
 class TestValidateInputStructure:
@@ -181,7 +292,7 @@ class TestCalcFreeEnergyWithCalphydIntegration:
     """Integration tests for main workflow with mocking"""
     
     @patch('phase_diagram_workflows.free_energies.ti_calculator._run_calphy')
-    @patch('phase_diagram_workflows.free_energies.ti_calculator.gather_calphy_results')
+    @patch('phase_diagram_workflows.free_energies.ti_calculator.gather_calphy_results_detailed')
     @patch('phase_diagram_workflows.free_energies.ti_calculator._build_calphy_config')
     def test_main_function_calls_correct_sequence(
         self, mock_build_config, mock_gather, mock_run_calphy
@@ -304,7 +415,7 @@ class TestExecutorIntegration:
     """Tests for executor-based workflow with metadata and LAMMPS library"""
 
     @patch('phase_diagram_workflows.free_energies.ti_calculator._run_calphy')
-    @patch('phase_diagram_workflows.free_energies.ti_calculator.gather_calphy_results')
+    @patch('phase_diagram_workflows.free_energies.ti_calculator.gather_calphy_results_detailed')
     @patch('phase_diagram_workflows.free_energies.ti_calculator._build_calphy_config')
     def test_executor_workflow_with_metadata_and_lammps(
         self, mock_build_config, mock_gather, mock_run_calphy
@@ -361,7 +472,7 @@ class TestExecutorIntegration:
             assert not result_df.empty
 
     @patch('phase_diagram_workflows.free_energies.ti_calculator._run_calphy')
-    @patch('phase_diagram_workflows.free_energies.ti_calculator.gather_calphy_results')
+    @patch('phase_diagram_workflows.free_energies.ti_calculator.gather_calphy_results_detailed')
     @patch('phase_diagram_workflows.free_energies.ti_calculator._build_calphy_config')
     def test_metadata_validation(self, mock_build_config, mock_gather, mock_run_calphy):
         """Test that metadata dictionary is handled correctly"""
@@ -399,7 +510,7 @@ class TestExecutorIntegration:
             assert isinstance(result_df, pd.DataFrame)
 
     @patch('phase_diagram_workflows.free_energies.ti_calculator._run_calphy')
-    @patch('phase_diagram_workflows.free_energies.ti_calculator.gather_calphy_results')
+    @patch('phase_diagram_workflows.free_energies.ti_calculator.gather_calphy_results_detailed')
     @patch('phase_diagram_workflows.free_energies.ti_calculator._build_calphy_config')
     def test_lammps_library_integration(self, mock_build_config, mock_gather, mock_run_calphy):
         """Test that LAMMPS library parameter is handled correctly"""
