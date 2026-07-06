@@ -1,11 +1,11 @@
 """
-Unit tests for the ts_convergence package: the purpose-agnostic core in
-base.py, and the binary-alloy layer built on it in ti_binary.py.
+Integration tests for phase_diagram_workflows.free_energies.ts_convergence.ti_binary.
 
-Tests that touch calphy run a real, small, fast calculation (Al, EAM
+Every test here runs a real, small, fast calphy calculation (Al, EAM
 potential via lammpsparser's iprpy database, ~100 equilibration/switching
 steps) instead of fabricating result files -- so they exercise the real
-forward/backward TI output format, not a guessed approximation of it.
+forward/backward TI output format, real executor timing, and real disk
+state, not a guessed approximation of any of them.
 """
 
 import matplotlib
@@ -15,20 +15,17 @@ import math
 import os
 import tempfile
 from concurrent.futures import Future
+from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 import pytest
 from ase.build import bulk
 from executorlib import SingleNodeExecutor
 from lammpsparser import get_potential_by_name
 
-from phase_diagram_workflows.free_energies.ts_convergence.base import (
-    check_ts_overlap,
-    decide_next_bracket,
-    resolve_current_bracket,
-    step_bracket,
-    ts_overlap_criterion,
-)
+import phase_diagram_workflows.free_energies.ts_convergence.ti_binary as ti_binary_module
+from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
 from phase_diagram_workflows.free_energies.ts_convergence.ti_binary import (
     _bracket_prefix,
     _bracket_working_directory,
@@ -42,125 +39,6 @@ from phase_diagram_workflows.free_energies.ts_convergence.ti_binary import (
     submit_bracket,
     submit_self_resubmitting_bracket,
 )
-
-
-class TestCheckTsOverlap:
-    def test_overlapping_within_tolerance(self):
-        assert check_ts_overlap([1.0, 2.0, 3.0], [3.0, 2.0, 1.05], tolerance=0.1) is True
-
-    def test_not_overlapping_outside_tolerance(self):
-        assert check_ts_overlap([1.0, 2.0, 3.0], [3.0, 2.0, 1.5], tolerance=0.1) is False
-
-    def test_boundary_is_converged(self):
-        assert check_ts_overlap([1.0], [1.1], tolerance=0.11) is True
-
-
-class TestStepBracket:
-    def test_step_upper_only(self):
-        assert step_bracket(300, 1000, step_upper=100) == (300, 900)
-
-    def test_step_lower_only(self):
-        assert step_bracket(300, 1000, step_lower=50) == (350, 1000)
-
-    def test_step_both_independently(self):
-        assert step_bracket(300, 1000, step_lower=50, step_upper=100) == (350, 900)
-
-    def test_no_step_given_raises(self):
-        with pytest.raises(ValueError, match="At least one"):
-            step_bracket(300, 1000)
-
-    def test_collapsed_bracket_raises(self):
-        with pytest.raises(ValueError, match="collapsed"):
-            step_bracket(300, 350, step_upper=100)
-
-
-class TestResolveCurrentBracket:
-    def test_no_prior_attempts_returns_initial(self):
-        assert resolve_current_bracket((300, 1000), []) == (300, 1000)
-
-    def test_upper_bound_narrows_to_most_restrictive(self):
-        assert resolve_current_bracket((300, 1000), [(300, 900), (300, 800)]) == (300, 800)
-
-    def test_lower_bound_narrows_to_most_restrictive(self):
-        assert resolve_current_bracket((300, 1000), [(350, 1000), (400, 1000)]) == (400, 1000)
-
-    def test_both_bounds_narrow_independently(self):
-        assert resolve_current_bracket((300, 1000), [(350, 900)]) == (350, 900)
-
-    def test_bounds_narrowed_past_each_other_raises(self):
-        # Neither (600, 1000) nor (300, 500) was ever run as a single
-        # attempt; combining their most-restrictive bounds independently
-        # gives (600, 500), which is inverted.
-        with pytest.raises(ValueError, match="narrowed past each other"):
-            resolve_current_bracket((300, 1000), [(600, 1000), (300, 500)])
-
-
-class TestDecideNextBracket:
-    """Pure decision logic: no executor involved anywhere in this class."""
-
-    def test_unknown_criterion_returns_current_bracket_unchanged(self):
-        assert decide_next_bracket((300, 1000), None, tolerance=0.005) == (300, 1000)
-
-    def test_within_tolerance_returns_none(self):
-        assert decide_next_bracket((300, 1000), criterion=0.003, tolerance=0.005) is None
-
-    def test_exceeds_tolerance_returns_narrowed_bracket(self):
-        assert decide_next_bracket(
-            (300, 1000), criterion=0.02, tolerance=0.005, step_upper=100
-        ) == (300, 900)
-
-    def test_same_criterion_different_tolerances_only_changes_the_decision(self):
-        # The exact scenario from the notebook: nothing about the bracket or
-        # its criterion changes -- only the tolerance a human is trying out.
-        current_bracket, criterion = (700.0, 900.0), 0.0212
-        assert decide_next_bracket(current_bracket, criterion, tolerance=0.005, step_upper=100.0) == (700.0, 800.0)
-        assert decide_next_bracket(current_bracket, criterion, tolerance=0.03, step_upper=100.0) is None
-
-
-class TestBracketPrefixAndWorkingDirectory:
-    def test_prefix_uses_six_decimals_by_default(self):
-        row = pd.Series({
-            "main_element": "Al", "mixing_element": "Mg",
-            "phase_type": "fcc", "reference_phase": "solid", "c_in": 0.125,
-        })
-        assert _bracket_prefix(row) == "AlMg_fcc_solid_0.125000"
-
-    def test_prefix_respects_conc_decimals(self):
-        row = pd.Series({
-            "main_element": "Al", "mixing_element": "Mg",
-            "phase_type": "liquid", "reference_phase": "liquid", "c_in": 0.5,
-        })
-        assert _bracket_prefix(row, conc_decimals=2) == "AlMg_liquid_liquid_0.50"
-
-    def test_working_directory_encodes_bracket(self):
-        wd = _bracket_working_directory("/root", "AlMg_fcc_solid_0.125000", 300.0, 1000.0)
-        assert wd == "/root/AlMg_fcc_solid_0.125000_T_300.00_1000.00"
-
-
-class TestFindTriedBrackets:
-    def test_empty_root_returns_empty(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assert _find_tried_brackets(os.path.join(tmpdir, "missing"), "prefix") == []
-
-    def test_finds_matching_subfolders_only(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            os.makedirs(os.path.join(tmpdir, "AlMg_fcc_solid_0.125000_T_300.00_900.00"))
-            os.makedirs(os.path.join(tmpdir, "AlMg_fcc_solid_0.125000_T_350.00_900.00"))
-            os.makedirs(os.path.join(tmpdir, "AlMg_hcp_solid_0.125000_T_300.00_900.00"))  # different prefix
-
-            tried = _find_tried_brackets(tmpdir, "AlMg_fcc_solid_0.125000")
-            assert sorted(tried) == [(300.0, 900.0), (350.0, 900.0)]
-
-    def test_skips_unparsable_folder_names_instead_of_crashing(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            os.makedirs(os.path.join(tmpdir, "AlMg_fcc_solid_0.125000_T_300.00_900.00"))
-            # A manual backup copy with an extra underscore in the suffix.
-            os.makedirs(os.path.join(tmpdir, "AlMg_fcc_solid_0.125000_T_300.00_900.00_backup"))
-            # Non-numeric suffix.
-            os.makedirs(os.path.join(tmpdir, "AlMg_fcc_solid_0.125000_T_abc_def"))
-
-            tried = _find_tried_brackets(tmpdir, "AlMg_fcc_solid_0.125000")
-            assert tried == [(300.0, 900.0)]
 
 
 class EagerExecutor:
@@ -338,19 +216,27 @@ class TestRefineTemperatureBracketReal:
         assert second["bracket"] == (700.0, 710.0)
 
         # Fresh call (simulating a new session, generous tolerance now):
-        # should resolve straight to the narrowed bracket already on disk.
+        # (700, 720) is also on disk and trivially satisfies this generous
+        # tolerance too -- and it's wider (cheaper, less-narrowed) than
+        # (700, 710), so it should be preferred over just resolving to the
+        # narrowest bracket tried so far. Only narrowing under the earlier,
+        # unreachable tolerance ever justified going past (700, 720) in the
+        # first place; there's no reason to keep treating that as settled
+        # once a looser tolerance is in effect.
+        third_executor = EagerExecutor()
         third = refine_temperature_bracket(
             row=row,
             calphy_parameters=base_ts_params,
             potential_df=potential_df,
-            executor=EagerExecutor(),
+            executor=third_executor,
             working_directory_root=str(tmp_path),
             initial_bracket=(700.0, 720.0),
             tolerance=1.0,
             step_upper=10.0,
         )
-        assert third["bracket"] == (700.0, 710.0)
+        assert third["bracket"] == (700.0, 720.0)
         assert third["status"] == "converged"
+        assert len(third_executor.submit_calls) == 0  # recovered from disk, nothing (re)submitted
 
     def test_pending_regardless_of_what_the_executor_does(
         self, small_structure, potential_df, base_ts_params, tmp_path
@@ -390,7 +276,7 @@ class TestAutoRefineTemperatureBrackets:
             initial_bracket=(700.0, 720.0),
             tolerance=1.0,  # generous: converges immediately
             step_upper=10.0,
-            max_iterations=10,
+            max_iterations=3,
         )
 
         assert list(result_df.index) == list(structures_df.index)
@@ -444,7 +330,7 @@ class TestAutoRefineTemperatureBrackets:
             initial_bracket=(700.0, 720.0),
             tolerance=1.0,
             step_upper=10.0,
-            max_iterations=10,
+            max_iterations=3,
         )
 
         assert (result_df["status"] == "converged").all()
@@ -554,6 +440,122 @@ class TestSubmitSelfResubmittingBracket:
         prefix = _bracket_prefix(row)
         tried = _find_tried_brackets(working_directory_root, prefix)
         assert tried == [(700.0, 720.0)]  # nothing chained -- converged on the first try
+
+    def test_second_independent_bootstrap_reuses_disk_result_without_recomputing(
+        self, small_structure, potential_df, base_ts_params, tmp_path
+    ):
+        # Regression test for a real bug: a second, independent call to
+        # submit_self_resubmitting_bracket for the same row/bracket (e.g. a
+        # notebook cell rerun bootstrapping to whatever's already on disk)
+        # must reuse the existing result rather than rerunning calphy.
+        # Rerunning is not just wasteful -- calphy's MD is stochastic, so
+        # recomputing an already-converged bracket can silently produce a
+        # *different*, unconverged criterion the second time, which is
+        # exactly how a bracket that already converged ends up narrowed
+        # past: the narrowing decision was made from an earlier run's
+        # result before a later, redundant one overwrote it.
+        row = _make_row(small_structure, c_in=1.1)
+        working_directory_root = str(tmp_path)
+
+        future, _ = submit_self_resubmitting_bracket(
+            row=row,
+            calphy_parameters=base_ts_params,
+            potential_df=potential_df,
+            executor=EagerExecutor(),
+            executor_factory=EagerExecutor,
+            working_directory_root=working_directory_root,
+            initial_bracket=(700.0, 720.0),
+            tolerance=1.0,  # generous: converges immediately
+            step_upper=10.0,
+            max_iterations=3,
+        )
+        future.result()
+
+        with patch(
+            "phase_diagram_workflows.free_energies.ts_convergence.ti_binary.calc_free_energy_with_calphy",
+            wraps=ti_binary_module.calc_free_energy_with_calphy,
+        ) as spy:
+            second_future, _ = submit_self_resubmitting_bracket(
+                row=row,
+                calphy_parameters=base_ts_params,
+                potential_df=potential_df,
+                executor=EagerExecutor(),
+                executor_factory=EagerExecutor,
+                working_directory_root=working_directory_root,
+                initial_bracket=(700.0, 720.0),
+                tolerance=1.0,
+                step_upper=10.0,
+                max_iterations=3,
+            )
+            _, df = second_future.result()
+
+        spy.assert_not_called()
+        assert df.iloc[0]["forward_energy_diff"] is not None
+
+        prefix = _bracket_prefix(row)
+        tried = _find_tried_brackets(working_directory_root, prefix)
+        assert tried == [(700.0, 720.0)]  # still nothing chained
+
+    def test_does_not_chain_past_a_wider_already_converged_bracket(
+        self, small_structure, potential_df, base_ts_params, tmp_path
+    ):
+        # Regression test for the same bug from the other direction: seed
+        # history with a wide, already-converged bracket plus a narrower one
+        # that also exists on disk (as if narrowing had previously continued
+        # under a stricter tolerance). Bootstrapping fresh with today's
+        # (looser) tolerance must recover the wider bracket and stop --
+        # not keep resubmitting narrower ones just because a narrower
+        # bracket happens to be what's currently on disk.
+        row = _make_row(small_structure, c_in=1.2)
+        working_directory_root = str(tmp_path)
+
+        wide_future, _ = submit_self_resubmitting_bracket(
+            row=row,
+            calphy_parameters=base_ts_params,
+            potential_df=potential_df,
+            executor=EagerExecutor(),
+            executor_factory=EagerExecutor,
+            working_directory_root=working_directory_root,
+            initial_bracket=(700.0, 720.0),
+            tolerance=1.0,  # generous: converges immediately at (700, 720)
+            step_upper=10.0,
+            max_iterations=3,
+        )
+        wide_future.result()
+
+        # A narrower bracket also exists on disk, as if produced by an
+        # earlier, stricter tolerance.
+        submit_bracket(row, (700.0, 710.0), base_ts_params, potential_df, EagerExecutor(), working_directory_root)
+
+        prefix = _bracket_prefix(row)
+        tried_before = sorted(_find_tried_brackets(working_directory_root, prefix))
+        assert tried_before == [(700.0, 710.0), (700.0, 720.0)]
+
+        second_future, _ = submit_self_resubmitting_bracket(
+            row=row,
+            calphy_parameters=base_ts_params,
+            potential_df=potential_df,
+            executor=EagerExecutor(),
+            executor_factory=EagerExecutor,
+            working_directory_root=working_directory_root,
+            initial_bracket=(700.0, 720.0),
+            tolerance=1.0,  # same, generous tolerance -- both brackets satisfy it
+            step_upper=10.0,
+            max_iterations=3,
+        )
+        _, resolved_df = second_future.result()
+
+        # Must recover the wider (700, 720) bracket and stop there -- not
+        # keep narrowing past it just because (700, 710) is what's narrowest
+        # on disk. No new bracket should have been submitted at all.
+        tried_after = sorted(_find_tried_brackets(working_directory_root, prefix))
+        assert tried_after == tried_before
+
+        wide_working_directory = _bracket_working_directory(working_directory_root, prefix, 700.0, 720.0)
+        wide_df = gather_calphy_results_detailed(wide_working_directory)
+        assert np.array_equal(
+            resolved_df.iloc[0]["forward_energy_diff"][0], wide_df.iloc[0]["forward_energy_diff"][0]
+        )
 
     def test_chains_until_max_iterations_without_raising(
         self, small_structure, potential_df, base_ts_params, tmp_path

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 
 def ts_overlap_criterion(
@@ -198,3 +198,43 @@ def decide_next_bracket(
         return None
 
     return step_bracket(current_bracket[0], current_bracket[1], step_lower=step_lower, step_upper=step_upper)
+
+
+def pick_best_converged_bracket(
+    criteria_by_bracket: Dict[Tuple[float, float], float],
+    tolerance: float,
+) -> Optional[Tuple[float, float]]:
+    """Pick the widest already-tried bracket whose criterion satisfies tolerance.
+
+    Narrowing only ever moves in one direction once started, driven by
+    whatever `tolerance` was checked against at each step. If an earlier,
+    wider bracket already satisfied the tolerance currently in effect, there
+    is no reason to trust (or keep narrowing past) a later, narrower one --
+    that later narrowing only happened because of what an earlier check
+    decided, and re-deciding from a stale or re-run result is exactly how a
+    bracket that already converged ends up narrowed past anyway. Checking
+    every tried bracket against the current tolerance directly, rather than
+    just the narrowest one, is what actually prevents that.
+
+    Parameters
+    ----------
+    criteria_by_bracket : Dict[Tuple[float, float], float]
+        Every already-tried bracket that has a known criterion, mapped to
+        that criterion.
+    tolerance : float
+        Maximum allowed criterion to count as converged.
+
+    Returns
+    -------
+    Optional[Tuple[float, float]]
+        The widest bracket among those satisfying `tolerance`, or `None` if
+        none do.
+    """
+    candidates = [
+        bracket for bracket, criterion in criteria_by_bracket.items()
+        if criterion is not None and criterion <= tolerance
+    ]
+    if not candidates:
+        return None
+
+    return max(candidates, key=lambda bracket: bracket[1] - bracket[0])

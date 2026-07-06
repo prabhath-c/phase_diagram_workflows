@@ -19,6 +19,7 @@ from phase_diagram_workflows.free_energies.ti_calculator import (
 )
 from phase_diagram_workflows.free_energies.ts_convergence.base import (
     decide_next_bracket,
+    pick_best_converged_bracket,
     resolve_current_bracket,
     ts_overlap_criterion,
 )
@@ -77,6 +78,36 @@ def _find_tried_brackets(working_directory_root: str, prefix: str) -> List[Tuple
         tried.append((t_low, t_high))
 
     return tried
+
+
+def _tried_bracket_criteria(
+    prefix: str,
+    working_directory_root: str,
+    tried_brackets: List[Tuple[float, float]],
+) -> Dict[Tuple[float, float], float]:
+    """Read the TI overlap criterion for every already-tried bracket that has one.
+
+    Brackets with no result yet (still running) or incomplete results (e.g.
+    fe mode) are silently omitted rather than reported as some placeholder
+    value -- callers should treat "not in this dict" as "unknown", not "bad".
+    """
+    criteria: Dict[Tuple[float, float], float] = {}
+    for t_low, t_high in tried_brackets:
+        working_directory = _bracket_working_directory(working_directory_root, prefix, t_low, t_high)
+        try:
+            df = gather_calphy_results_detailed(working_directory)
+        except FileNotFoundError:
+            continue
+
+        result_row = df.iloc[0]
+        forward = result_row["forward_energy_diff"]
+        backward = result_row["backward_energy_diff"]
+        if forward is None or backward is None:
+            continue
+
+        criteria[(t_low, t_high)] = ts_overlap_criterion(forward[0], backward[0])
+
+    return criteria
 
 
 def submit_bracket(
@@ -214,6 +245,26 @@ def refine_temperature_bracket(
     """
     prefix = _bracket_prefix(row, conc_decimals=conc_decimals)
     tried_brackets = _find_tried_brackets(working_directory_root, prefix)
+
+    # Before doing anything with the narrowest tried bracket, check whether
+    # some already-tried bracket -- possibly wider -- already satisfies
+    # `tolerance`. Narrowing only ever moves in one direction once started;
+    # if an earlier, wider bracket already converged, there's no reason to
+    # wait on (or keep narrowing past) a narrower one, regardless of what
+    # its own result says.
+    criteria_by_bracket = _tried_bracket_criteria(prefix, working_directory_root, tried_brackets)
+    best_converged = pick_best_converged_bracket(criteria_by_bracket, tolerance)
+    if best_converged is not None:
+        converged_working_directory = _bracket_working_directory(
+            working_directory_root, prefix, best_converged[0], best_converged[1]
+        )
+        return {
+            "status": "converged",
+            "bracket": best_converged,
+            "working_directory": converged_working_directory,
+            "df": gather_calphy_results_detailed(converged_working_directory),
+        }
+
     current_bracket = resolve_current_bracket(initial_bracket, tried_brackets)
     working_directory = _bracket_working_directory(working_directory_root, prefix, current_bracket[0], current_bracket[1])
 
@@ -426,16 +477,55 @@ def _calc_and_maybe_resubmit(
     whatever process called `submit_self_resubmitting_bracket` in the first
     place. That process can disconnect immediately after the first
     submission; nothing further is required from it.
-    """
-    params = dict(calphy_parameters)
-    params["temperature"] = list(current_bracket)
 
-    input_class, df = calc_free_energy_with_calphy(
-        input_structure=row["atoms"],
-        potential_df=potential_df,
-        calphy_parameters=params,
-        working_directory=working_directory,
+    Deliberately checks disk before doing (or redoing) any work, for two
+    reasons that both matter here specifically because `tolerance` is one of
+    this function's own arguments (unlike `submit_bracket`, which excludes
+    it): first, a bracket that's already on disk is reused as-is rather than
+    recomputed -- calphy's MD is stochastic, so rerunning an
+    already-computed bracket (e.g. because a second, independent call
+    bootstrapped back to the same "current" bracket) can silently produce a
+    *different* criterion than the first time, which is exactly how a
+    bracket that already converged can end up narrowed past: the narrowing
+    decision was made from an earlier run's result before this one
+    overwrote it. Second, and separately, if some already-tried bracket --
+    possibly wider, from an earlier step -- already satisfies `tolerance`,
+    there's nothing left to do at all: don't recompute `current_bracket` and
+    don't resubmit anything narrower.
+    """
+    prefix = _bracket_prefix(row, conc_decimals=conc_decimals)
+    tried_brackets = _find_tried_brackets(working_directory_root, prefix)
+    criteria_by_bracket = _tried_bracket_criteria(prefix, working_directory_root, tried_brackets)
+
+    best_converged = pick_best_converged_bracket(criteria_by_bracket, tolerance)
+    if best_converged is not None:
+        converged_working_directory = _bracket_working_directory(
+            working_directory_root, prefix, best_converged[0], best_converged[1]
+        )
+        return None, gather_calphy_results_detailed(converged_working_directory)
+
+    # Approximate equality, matching get_unique_criterion_table: t_low/t_high
+    # round-trip through the .2f directory-naming format, so a bracket
+    # combined or stepped in-memory can differ from the parsed disk value in
+    # the last decimal without being a genuinely different bracket.
+    already_computed = any(
+        np.isclose(bracket[0], current_bracket[0], atol=0.005) and np.isclose(bracket[1], current_bracket[1], atol=0.005)
+        for bracket in criteria_by_bracket
     )
+    if already_computed:
+        # Already computed (just not within tolerance) -- reuse it instead
+        # of rerunning calphy and risking a different stochastic result.
+        df = gather_calphy_results_detailed(working_directory)
+        input_class = None
+    else:
+        params = dict(calphy_parameters)
+        params["temperature"] = list(current_bracket)
+        input_class, df = calc_free_energy_with_calphy(
+            input_structure=row["atoms"],
+            potential_df=potential_df,
+            calphy_parameters=params,
+            working_directory=working_directory,
+        )
 
     result_row = df.iloc[0]
     forward = result_row["forward_energy_diff"]
@@ -453,7 +543,6 @@ def _calc_and_maybe_resubmit(
     if iterations_used >= max_iterations:
         return input_class, df  # give up on this row; this bracket is the final state
 
-    prefix = _bracket_prefix(row, conc_decimals=conc_decimals)
     new_working_directory = _bracket_working_directory(
         working_directory_root, prefix, next_bracket[0], next_bracket[1]
     )
