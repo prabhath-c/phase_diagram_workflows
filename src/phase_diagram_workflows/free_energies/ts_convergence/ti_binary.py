@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from concurrent.futures import FIRST_COMPLETED, wait
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -400,6 +400,166 @@ def auto_refine_temperature_brackets(
     return pd.DataFrame([results[idx] for idx in structures_df.index], index=structures_df.index)
 
 
+def _calc_and_maybe_resubmit(
+    row: pd.Series,
+    calphy_parameters: Dict[str, Any],
+    potential_df: pd.DataFrame,
+    working_directory: str,
+    current_bracket: Tuple[float, float],
+    tolerance: float,
+    step_lower: Optional[float],
+    step_upper: Optional[float],
+    conc_decimals: int,
+    working_directory_root: str,
+    executor_factory: Callable[[], Any],
+    max_iterations: int,
+    iterations_used: int,
+) -> Tuple[Any, pd.DataFrame]:
+    """Run one bracket for real, then chain the next one from *inside* this call.
+
+    This is what actually gets submitted -- not `calc_free_energy_with_calphy`
+    directly. It runs the real calphy calculation itself, and if the result
+    doesn't converge, builds a fresh executor via `executor_factory()` and
+    submits *itself* again for the narrower bracket, right here, before
+    returning -- so the chain of resubmissions happens whichever process
+    actually executes this function (e.g. a SLURM compute node), not in
+    whatever process called `submit_self_resubmitting_bracket` in the first
+    place. That process can disconnect immediately after the first
+    submission; nothing further is required from it.
+    """
+    params = dict(calphy_parameters)
+    params["temperature"] = list(current_bracket)
+
+    input_class, df = calc_free_energy_with_calphy(
+        input_structure=row["atoms"],
+        potential_df=potential_df,
+        calphy_parameters=params,
+        working_directory=working_directory,
+    )
+
+    result_row = df.iloc[0]
+    forward = result_row["forward_energy_diff"]
+    backward = result_row["backward_energy_diff"]
+
+    if forward is None or backward is None:
+        return input_class, df  # incomplete (e.g. wrong mode); nothing to chain
+
+    criterion = ts_overlap_criterion(forward[0], backward[0])
+    next_bracket = decide_next_bracket(current_bracket, criterion, tolerance, step_lower=step_lower, step_upper=step_upper)
+
+    if next_bracket is None:
+        return input_class, df  # converged
+
+    if iterations_used >= max_iterations:
+        return input_class, df  # give up on this row; this bracket is the final state
+
+    prefix = _bracket_prefix(row, conc_decimals=conc_decimals)
+    new_working_directory = _bracket_working_directory(
+        working_directory_root, prefix, next_bracket[0], next_bracket[1]
+    )
+
+    next_executor = executor_factory()
+    next_executor.submit(
+        _calc_and_maybe_resubmit,
+        row=row,
+        calphy_parameters=calphy_parameters,
+        potential_df=potential_df,
+        working_directory=new_working_directory,
+        current_bracket=next_bracket,
+        tolerance=tolerance,
+        step_lower=step_lower,
+        step_upper=step_upper,
+        conc_decimals=conc_decimals,
+        working_directory_root=working_directory_root,
+        executor_factory=executor_factory,
+        max_iterations=max_iterations,
+        iterations_used=iterations_used + 1,
+    )
+    next_executor.shutdown(wait=False, cancel_futures=False)
+
+    return input_class, df
+
+
+def submit_self_resubmitting_bracket(
+    row: pd.Series,
+    calphy_parameters: Dict[str, Any],
+    potential_df: pd.DataFrame,
+    executor: Any,
+    executor_factory: Callable[[], Any],
+    working_directory_root: str,
+    initial_bracket: Tuple[float, float],
+    tolerance: float,
+    step_lower: Optional[float] = None,
+    step_upper: Optional[float] = None,
+    conc_decimals: int = 6,
+    max_iterations: int = 10,
+) -> Tuple[Any, str]:
+    """Submit one row as a self-chaining bracket and return immediately.
+
+    Unlike `auto_refine_temperature_brackets` (which blocks in the calling
+    process until every row converges), this submits once and returns right
+    away: the submitted job itself (`_calc_and_maybe_resubmit`) decides
+    whether to resubmit the next narrower bracket, using `executor_factory`
+    to build a fresh executor wherever *it* is running. For a cluster
+    executor (e.g. `SlurmClusterExecutor`), that means the whole narrowing
+    chain runs as a sequence of independent SLURM jobs with nothing waiting
+    on them in the calling process -- submit and walk away. For an executor
+    that runs in the same process it was created in (e.g.
+    `SingleNodeExecutor`), the calling process still has to stay alive for
+    the chain to run, the same as today; this only changes anything for a
+    genuinely separate-process/cluster executor.
+
+    Parameters
+    ----------
+    row : pd.Series
+        One row of a structures DataFrame.
+    calphy_parameters, potential_df, working_directory_root, initial_bracket,
+    tolerance, step_lower, step_upper, conc_decimals, max_iterations :
+        Same meaning as in `refine_temperature_bracket`/
+        `auto_refine_temperature_brackets`.
+    executor : Any
+        Executor used for *this* first submission only.
+    executor_factory : Callable[[], Any]
+        Zero-argument callable that builds a fresh executor equivalent to
+        `executor`, called from within the running job each time it needs
+        to submit the next bracket. Must be picklable (e.g. a module-level
+        function or a lambda closing over only picklable values), since it
+        travels with the submitted task to wherever it actually executes.
+
+    Returns
+    -------
+    Tuple[Any, str]
+        The future for the first submission, and its working directory.
+        Nothing about later brackets in the chain is returned here -- check
+        on them later via `build_criterion_table`, same as manual mode.
+    """
+    prefix = _bracket_prefix(row, conc_decimals=conc_decimals)
+    tried_brackets = _find_tried_brackets(working_directory_root, prefix)
+    current_bracket = resolve_current_bracket(initial_bracket, tried_brackets)
+    working_directory = _bracket_working_directory(
+        working_directory_root, prefix, current_bracket[0], current_bracket[1]
+    )
+
+    future = executor.submit(
+        _calc_and_maybe_resubmit,
+        row=row,
+        calphy_parameters=calphy_parameters,
+        potential_df=potential_df,
+        working_directory=working_directory,
+        current_bracket=current_bracket,
+        tolerance=tolerance,
+        step_lower=step_lower,
+        step_upper=step_upper,
+        conc_decimals=conc_decimals,
+        working_directory_root=working_directory_root,
+        executor_factory=executor_factory,
+        max_iterations=max_iterations,
+        iterations_used=0,
+    )
+
+    return future, working_directory
+
+
 def build_criterion_table(
     structures_df: pd.DataFrame,
     working_directory_root: str,
@@ -471,13 +631,27 @@ def build_criterion_table(
 def get_unique_criterion_table(
     criterion_table: pd.DataFrame,
     initial_bracket: Tuple[float, float],
+    tolerance: Optional[float] = None,
 ) -> pd.DataFrame:
-    """Collapse a criterion table to one row per concentration: the current bracket.
+    """Collapse a criterion table to one row per concentration.
 
     Direct replacement for jackall's `get_unique_phase_change_criterion_table`.
-    "Current" is defined the same way `refine_temperature_bracket` defines it
-    (via `resolve_current_bracket`), so this always matches what would
-    actually be resubmitted next.
+
+    If `tolerance` is given, picks -- per concentration/phase -- the *widest*
+    (least-narrowed) tried bracket whose criterion already satisfies that
+    tolerance. This matters because narrowing is a one-way ratchet driven by
+    whatever tolerance was in effect at the time: if you ran with a strict
+    tolerance first and later want to judge against a looser one, the extra
+    narrower reruns done to satisfy the strict tolerance were unnecessary for
+    the looser one, and picking the narrowest bracket on disk would silently
+    prefer them anyway. Passing the current `tolerance` here recovers the
+    coarsest (cheapest) bracket that was already good enough, instead of
+    discarding that datapoint in favor of a later, unnecessarily narrow one.
+
+    If `tolerance` is omitted (or nothing yet satisfies it for a given
+    concentration), falls back to the "current" bracket -- the same
+    combined bracket `refine_temperature_bracket` would resubmit next (via
+    `resolve_current_bracket`), i.e. the narrowest bracket tried so far.
 
     Parameters
     ----------
@@ -485,14 +659,25 @@ def get_unique_criterion_table(
         Output of `build_criterion_table`.
     initial_bracket : Tuple[float, float]
         The `(t_low, t_high)` bracket each sweep started from.
+    tolerance : float, optional
+        Overlap-criterion tolerance to judge convergence against. If not
+        given, the narrowest tried bracket is reported regardless of whether
+        it actually converged.
 
     Returns
     -------
     pd.DataFrame
-        One row per concentration/phase, matching the current bracket.
+        One row per concentration/phase.
     """
     rows = []
     for _, group in criterion_table.groupby(_IDENTITY_COLUMNS):
+        if tolerance is not None:
+            converged = group[group["criterion"] <= tolerance]
+            if not converged.empty:
+                widths = converged["t_high"] - converged["t_low"]
+                rows.append(converged.loc[[widths.idxmax()]].iloc[0])
+                continue
+
         tried_brackets = list(zip(group["t_low"], group["t_high"]))
         current = resolve_current_bracket(initial_bracket, tried_brackets)
         # Approximate equality: t_low/t_high round-trip through the .2f

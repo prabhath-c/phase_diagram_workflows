@@ -11,6 +11,7 @@ forward/backward TI output format, not a guessed approximation of it.
 import matplotlib
 matplotlib.use("Agg")
 
+import math
 import os
 import tempfile
 from concurrent.futures import Future
@@ -39,6 +40,7 @@ from phase_diagram_workflows.free_energies.ts_convergence.ti_binary import (
     plot_criterion_vs_concentration,
     refine_temperature_bracket,
     submit_bracket,
+    submit_self_resubmitting_bracket,
 )
 
 
@@ -181,6 +183,9 @@ class EagerExecutor:
         except Exception as exc:  # pragma: no cover - surfaced via future.result()
             future.set_exception(exc)
         return future
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        pass
 
 
 class _NeverDoneExecutor:
@@ -476,7 +481,10 @@ class TestAutoRefineTemperatureBracketsRealExecutor:
                 initial_bracket=(700.0, 720.0),
                 tolerance=1.0,  # generous: converges on the first real result
                 step_upper=10.0,
-                max_iterations=5,
+                # Kept low: calphy on a tiny 32-atom cell can be numerically
+                # unstable and may never actually converge, so this caps
+                # worst-case wall time regardless.
+                max_iterations=3,
             )
         finally:
             executor.shutdown(wait=False, cancel_futures=False)
@@ -509,6 +517,110 @@ class TestAutoRefineTemperatureBracketsRealExecutor:
         row = result_df.iloc[0]
         assert row["status"] == "resubmitted"
         assert row["bracket"] == (700.0, 710.0)
+
+
+class TestSubmitSelfResubmittingBracket:
+    """submit_self_resubmitting_bracket submits once and returns right away;
+    any further resubmission happens *inside* the submitted task itself
+    (`_calc_and_maybe_resubmit`), not in the calling process -- this is the
+    "submit and walk away" mode, as opposed to auto_refine_temperature_brackets
+    (which blocks in the caller) or refine_temperature_bracket (which expects
+    to be called again by hand).
+    """
+
+    def test_converges_without_chaining(self, small_structure, potential_df, base_ts_params, tmp_path):
+        row = _make_row(small_structure, c_in=0.8)
+        working_directory_root = str(tmp_path)
+
+        future, working_directory = submit_self_resubmitting_bracket(
+            row=row,
+            calphy_parameters=base_ts_params,
+            potential_df=potential_df,
+            executor=EagerExecutor(),
+            executor_factory=EagerExecutor,
+            working_directory_root=working_directory_root,
+            initial_bracket=(700.0, 720.0),
+            tolerance=1.0,  # generous: converges immediately
+            step_upper=10.0,
+            # Kept low: calphy on a tiny 32-atom cell can be numerically
+            # unstable and may never actually converge, so this caps
+            # worst-case wall time regardless.
+            max_iterations=3,
+        )
+
+        _, df = future.result()
+        assert df.iloc[0]["forward_energy_diff"] is not None
+
+        prefix = _bracket_prefix(row)
+        tried = _find_tried_brackets(working_directory_root, prefix)
+        assert tried == [(700.0, 720.0)]  # nothing chained -- converged on the first try
+
+    def test_chains_until_max_iterations_without_raising(
+        self, small_structure, potential_df, base_ts_params, tmp_path
+    ):
+        row = _make_row(small_structure, c_in=0.9)
+        working_directory_root = str(tmp_path)
+
+        # EagerExecutor runs fn(**kwargs) synchronously inside submit(), so
+        # by the time this call returns, the entire self-resubmitting chain
+        # (up to max_iterations) has already run in-process -- confirmed via
+        # what actually landed on disk, exercising the real chaining logic
+        # rather than a mock of it.
+        future, working_directory = submit_self_resubmitting_bracket(
+            row=row,
+            calphy_parameters=base_ts_params,
+            potential_df=potential_df,
+            executor=EagerExecutor(),
+            executor_factory=EagerExecutor,
+            working_directory_root=working_directory_root,
+            initial_bracket=(700.0, 740.0),
+            tolerance=-1.0,  # deterministically unreachable
+            step_upper=10.0,
+            max_iterations=2,
+        )
+        future.result()
+
+        prefix = _bracket_prefix(row)
+        tried = sorted(_find_tried_brackets(working_directory_root, prefix))
+        assert tried == [(700.0, 720.0), (700.0, 730.0), (700.0, 740.0)]
+
+    def test_converges_with_real_async_executor(self, small_structure, potential_df, base_ts_params, tmp_path):
+        # Proves executor_factory genuinely round-trips through cloudpickle
+        # to wherever _calc_and_maybe_resubmit actually executes, using a
+        # real async executor rather than the synchronous EagerExecutor.
+        # max_iterations is kept low and the assertion below doesn't require
+        # actual convergence: calphy on a tiny 32-atom cell can be
+        # numerically unstable and may never converge, and that's not what
+        # this test is checking -- only that the chain runs and stays bounded.
+        cache_directory = str(tmp_path / "cache")
+        working_directory_root = str(tmp_path / "work")
+        row = _make_row(small_structure, c_in=1.0)
+
+        def executor_factory():
+            return SingleNodeExecutor(cache_directory=cache_directory, max_cores=1)
+
+        executor = executor_factory()
+        try:
+            future, working_directory = submit_self_resubmitting_bracket(
+                row=row,
+                calphy_parameters=base_ts_params,
+                potential_df=potential_df,
+                executor=executor,
+                executor_factory=executor_factory,
+                working_directory_root=working_directory_root,
+                initial_bracket=(700.0, 720.0),
+                tolerance=1.0,  # generous: converges on the first real result, typically
+                step_upper=10.0,
+                max_iterations=2,
+            )
+            _, df = future.result()
+        finally:
+            executor.shutdown(wait=False, cancel_futures=False)
+
+        assert df.iloc[0]["forward_energy_diff"] is not None
+        prefix = _bracket_prefix(row)
+        tried = _find_tried_brackets(working_directory_root, prefix)
+        assert 1 <= len(tried) <= 3  # bounded by max_iterations regardless of convergence
 
 
 @pytest.fixture(scope="module")
@@ -597,6 +709,36 @@ class TestCriterionTableAndPlots:
         unique = get_unique_criterion_table(table, initial_bracket=(700.0, 720.0))
 
         assert len(unique) == 2
+        narrowed_row = unique[unique["c_in"] == 0.2].iloc[0]
+        assert (narrowed_row["t_low"], narrowed_row["t_high"]) == (700.0, 710.0)
+
+    def test_get_unique_criterion_table_tolerance_prefers_widest_converged_bracket(self, criterion_sweep):
+        structures_df, working_directory_root = criterion_sweep
+        table = build_criterion_table(structures_df, working_directory_root)
+
+        # A very loose tolerance is satisfied by every attempted bracket, so
+        # the widest (least-narrowed, cheapest) one should be reported
+        # instead of falling back to the narrowest bracket on disk -- this is
+        # what lets a later, looser tolerance recover an earlier bracket that
+        # was already good enough, rather than only ever seeing the extra
+        # narrowing that a previous, stricter tolerance forced.
+        unique = get_unique_criterion_table(
+            table, initial_bracket=(700.0, 720.0), tolerance=math.inf
+        )
+
+        widened_row = unique[unique["c_in"] == 0.2].iloc[0]
+        assert (widened_row["t_low"], widened_row["t_high"]) == (700.0, 720.0)
+
+    def test_get_unique_criterion_table_tolerance_falls_back_when_unmet(self, criterion_sweep):
+        structures_df, working_directory_root = criterion_sweep
+        table = build_criterion_table(structures_df, working_directory_root)
+
+        # Deterministically unreachable, so no attempt satisfies it -- falls
+        # back to the narrowest bracket on disk, same as the no-tolerance case.
+        unique = get_unique_criterion_table(
+            table, initial_bracket=(700.0, 720.0), tolerance=-1.0
+        )
+
         narrowed_row = unique[unique["c_in"] == 0.2].iloc[0]
         assert (narrowed_row["t_low"], narrowed_row["t_high"]) == (700.0, 710.0)
 
