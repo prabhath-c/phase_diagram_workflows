@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, List
 from pathlib import Path
 
+import numpy as np
+import yaml
 from ase.atoms import Atoms
 from calphy import Calculation
 import pandas as pd
@@ -93,6 +95,119 @@ def gather_calphy_results(parent_directory: str) -> pd.DataFrame:
         from calphy.postprocessing import gather_results
         df = gather_results('.')
     return df
+
+
+def gather_calphy_results_detailed(working_directory: str) -> pd.DataFrame:
+    """Read calphy results from a single calculation directory.
+
+    Independent of calphy's gather_results. Reads temperature sweep data
+    and forward/backward energy differences for phase-transition checking.
+
+    Parameters
+    ----------
+    working_directory : str
+        Path to a single calphy calculation directory (contains input_file.yaml)
+
+    Returns
+    -------
+    pd.DataFrame
+        Single-row DataFrame with columns:
+        - calculation: folder name
+        - calculation_mode: 'ts' or 'fe'
+        - reference_phase: 'solid' or 'liquid'
+        - pressure: float
+        - status: bool
+        - composition: dict mapping element to concentration
+        - temperature: array (ts) or scalar (fe)
+        - free_energy: array (ts) or scalar (fe)
+        - free_energy_error: array (ts) or 0.0 (fe)
+        - forward_energy_diff: list of arrays, one per iteration (ts only)
+        - backward_energy_diff: list of arrays, one per iteration (ts only)
+        - forward_lambda: list of arrays, one per iteration (ts only)
+        - backward_lambda: list of arrays, one per iteration (ts only)
+
+    Raises
+    ------
+    FileNotFoundError
+        If input_file.yaml is not found in working_directory
+    """
+    wd = os.path.abspath(working_directory)
+    folder_name = os.path.basename(wd)
+
+    inpfile = os.path.join(wd, "input_file.yaml")
+    if not os.path.exists(inpfile):
+        raise FileNotFoundError(f"No input_file.yaml found in {wd}")
+
+    with open(inpfile) as f:
+        inp_yaml = yaml.safe_load(f)
+    inp = inp_yaml["calculations"][0]
+    mode = inp["mode"]
+
+    data: Dict[str, Any] = {
+        "calculation": folder_name,
+        "calculation_mode": mode,
+        "reference_phase": inp["reference_phase"],
+        "pressure": inp["pressure"],
+    }
+
+    repfile = os.path.join(wd, "report.yaml")
+    if os.path.exists(repfile):
+        with open(repfile) as f:
+            rep = yaml.safe_load(f)
+        data["status"] = True
+        el_arr = np.array(rep["input"]["element"].split()).astype(str)
+        comp_arr = np.array(rep["input"]["concentration"].split()).astype(float)
+        data["composition"] = {x: float(y) for x, y in zip(el_arr, comp_arr)}
+    else:
+        data["status"] = False
+        data["composition"] = None
+        rep = None
+
+    if mode in ["ts", "tscale"]:
+        tsfile = os.path.join(wd, "temperature_sweep.dat")
+        if os.path.exists(tsfile):
+            t, fe, ferr = np.loadtxt(tsfile, unpack=True, usecols=(0, 1, 2))
+            data["temperature"] = t
+            data["free_energy"] = fe
+            data["free_energy_error"] = ferr
+        else:
+            data["temperature"] = np.asarray(inp["temperature"], dtype=float)
+            data["free_energy"] = np.nan
+            data["free_energy_error"] = np.nan
+
+        f_ediffs: List[np.ndarray] = []
+        b_ediffs: List[np.ndarray] = []
+        f_lambdas: List[np.ndarray] = []
+        b_lambdas: List[np.ndarray] = []
+        i = 1
+        while True:
+            fwdfile = os.path.join(wd, f"ts.forward_{i}.dat")
+            bkdfile = os.path.join(wd, f"ts.backward_{i}.dat")
+            if not os.path.exists(fwdfile):
+                break
+            fdx, _fp, _fvol, flambda = np.loadtxt(fwdfile, unpack=True, comments="#")
+            bdx, _bp, _bvol, blambda = np.loadtxt(bkdfile, unpack=True, comments="#")
+            f_ediffs.append(fdx / flambda)
+            b_ediffs.append(bdx / blambda)
+            f_lambdas.append(flambda)
+            b_lambdas.append(blambda)
+            i += 1
+
+        data["forward_energy_diff"] = f_ediffs if f_ediffs else None
+        data["backward_energy_diff"] = b_ediffs if b_ediffs else None
+        data["forward_lambda"] = f_lambdas if f_lambdas else None
+        data["backward_lambda"] = b_lambdas if b_lambdas else None
+
+    else:  # fe mode
+        data["temperature"] = inp["temperature"]
+        data["free_energy"] = rep["results"]["free_energy"] if rep else np.nan
+        data["free_energy_error"] = 0.0
+        data["forward_energy_diff"] = None
+        data["backward_energy_diff"] = None
+        data["forward_lambda"] = None
+        data["backward_lambda"] = None
+
+    return pd.DataFrame([data])
 
 def calc_free_energy_with_calphy(
     input_structure: Atoms,
@@ -204,9 +319,7 @@ def calc_free_energy_with_calphy(
 
             _run_calphy(input_class=input_class, lmp=lmp)
 
-        abs_working_dir = os.path.abspath(working_directory)
-        parent_dir = os.path.dirname(abs_working_dir)
-        df = gather_calphy_results(parent_dir)
+        df = gather_calphy_results_detailed(working_directory)
 
         return input_class, df
 
