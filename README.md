@@ -7,7 +7,7 @@
 [![Calphy](https://img.shields.io/badge/built_with-calphy-orange)](https://github.com/ICAMS/calphy)
 
 [![Tests](https://github.com/prabhath-c/phase_diagram_workflows/actions/workflows/tests.yml/badge.svg)](https://github.com/prabhath-c/phase_diagram_workflows/actions/workflows/tests.yml)
-[![codecov](https://codecov.io/gh/prabhath-c/phase_diagram_workflows/branch/main/graph/badge.svg)](https://codecov.io/gh/prabhath-c/phase_diagram_workflows)
+[![codecov](https://codecov.io/gh/prabhath-c/phase_diagram_workflows/graph/badge.svg?token=W47QH377QH)](https://codecov.io/gh/prabhath-c/phase_diagram_workflows)
 
 ## 📋 **Overview**
 
