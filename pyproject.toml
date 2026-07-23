@@ -25,11 +25,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "black", "ruff", "mypy"]
 executor = ["executorlib>=1.0.0", "pylammpsmpi>=0.1.0"]
 atomistics = ["atomistics"]
 materials_project = ["mp-api", "pymatgen"]
 plotting = ["plotly", "seaborn", "matplotlib"]
+# The test suite mocks mp-api/atomistics/executorlib at their call boundary
+# rather than skipping them, so these need to be importable (never actually
+# called for real) wherever tests run -- hence dev pulling in the other
+# extras rather than just lint/test tooling.
+dev = [
+    "pytest",
+    "pytest-cov",
+    "black",
+    "ruff",
+    "mypy",
+    "phase_diagrams_workflows[atomistics,materials_project,plotting]",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/phase_diagram_workflows"]
