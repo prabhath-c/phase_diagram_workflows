@@ -467,7 +467,17 @@ class TestAutoRefineTemperatureBracketsRealExecutor:
         cache_directory = str(tmp_path / "cache")
         working_directory_root = str(tmp_path / "work")
 
-        executor = SingleNodeExecutor(cache_directory=cache_directory, max_cores=1)
+        # hostname_localhost=True: without it, executorlib advertises the
+        # machine's real hostname (via gethostname()) for the child process
+        # to zmq-connect back to instead of localhost. That's fine on a
+        # normal workstation, but on an ephemeral CI runner the child can
+        # fail to resolve/connect to that hostname and silently keep
+        # retrying forever -- zmq doesn't raise, and executorlib's own
+        # receive-loop only gives up if the child process actually exits, so
+        # the test just hangs indefinitely instead of failing. Since this is
+        # always a single machine (never a multi-node HPC allocation), the
+        # real hostname was never needed here anyway.
+        executor = SingleNodeExecutor(cache_directory=cache_directory, max_cores=1, hostname_localhost=True)
         try:
             result_df = auto_refine_temperature_brackets(
                 structures_df=structures_df,
@@ -495,7 +505,10 @@ class TestAutoRefineTemperatureBracketsRealExecutor:
         cache_directory = str(tmp_path / "cache")
         working_directory_root = str(tmp_path / "work")
 
-        executor = SingleNodeExecutor(cache_directory=cache_directory, max_cores=1)
+        # hostname_localhost=True: see test_converges_with_real_async_executor
+        # above -- avoids a hang on CI runners where the child process can't
+        # resolve/connect to the parent's real hostname.
+        executor = SingleNodeExecutor(cache_directory=cache_directory, max_cores=1, hostname_localhost=True)
         try:
             result_df = auto_refine_temperature_brackets(
                 structures_df=structures_df,
@@ -733,7 +746,10 @@ class TestSubmitSelfResubmittingBracketRealExecutor:
         row = _make_row(small_structure, c_in=1.0)
 
         def executor_factory():
-            return SingleNodeExecutor(cache_directory=cache_directory, max_cores=1)
+            # hostname_localhost=True: see TestAutoRefineTemperatureBracketsRealExecutor
+            # above -- avoids a hang on CI runners where the child process
+            # can't resolve/connect to the parent's real hostname.
+            return SingleNodeExecutor(cache_directory=cache_directory, max_cores=1, hostname_localhost=True)
 
         executor = executor_factory()
         try:
