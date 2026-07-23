@@ -16,7 +16,10 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest]
-        python-version: ['3.11', '3.12', '3.13']
+        # Temporarily trimmed to one version while verifying the
+        # hostname_localhost fix for the SingleNodeExecutor CI hang -- restore
+        # the full ['3.11', '3.12', '3.13'] matrix once confirmed.
+        python-version: ['3.11']
 
     steps:
     - uses: actions/checkout@v4
