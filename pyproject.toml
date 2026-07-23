@@ -20,13 +20,61 @@ dependencies = [
     "pandas",
     "lammpsparser",
     "ruamel.yaml",
-    "pydantic>=2,<3"
+    "pydantic>=2,<3",
+    "scipy"
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "black", "ruff", "mypy", "matplotlib", "executorlib>=1.0.0", "pylammpsmpi>=0.1.0"]
 executor = ["executorlib>=1.0.0", "pylammpsmpi>=0.1.0"]
-plotting = ["matplotlib"]
+# atomistics[lammps] (not bare atomistics) so pip's resolver actually sees
+# atomistics' own pylammpsmpi/lammpsparser upper bounds -- without it,
+# pip has no reason to keep those below whatever atomistics.calculators.lammps
+# was actually tested against, and can silently pick versions with breaking
+# API changes atomistics' own import-warning wrapper then swallows (surfacing
+# as `atomistics.calculators` having no `lammps` attribute at import time,
+# not as an install-time conflict).
+atomistics = ["atomistics[lammps]"]
+materials_project = ["mp-api", "pymatgen"]
+plotting = ["plotly", "seaborn", "matplotlib"]
+# The test suite mocks mp-api/atomistics/executorlib at their call boundary
+# rather than skipping them, so these need to be importable (never actually
+# called for real) wherever tests run -- hence dev pulling in the other
+# extras rather than just lint/test tooling.
+dev = [
+    "pytest",
+    "pytest-cov",
+    "black",
+    "ruff",
+    "mypy",
+    "phase_diagrams_workflows[atomistics,materials_project,plotting,executor]",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/phase_diagram_workflows"]
+
+[tool.coverage.run]
+source = ["src/phase_diagram_workflows"]
+branch = true
+parallel = true
+# CI installs the package non-editably, so the code actually executed at
+# test time lives in a site-packages copy, not src/phase_diagram_workflows/.
+# Without this, coverage.xml records those absolute site-packages paths,
+# and Codecov's patch-coverage can't match any of them back to the PR
+# diff's src/-relative paths -- reporting 0% covered even when the tests
+# genuinely exercise the code (see PR discussion).
+relative_files = true
+omit = ["*/tests/*", "*/__init__.py"]
+
+[tool.coverage.report]
+show_missing = true
+# No fail_under: this was silently unenforced before (dead config -- see
+# tool.coverage.run above), and the pre-existing free_energies modules sit
+# well under 80%. Reviving the gate is a separate call for whoever adds
+# coverage there, not something this fix should surface as a new failure.
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]

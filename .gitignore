@@ -7,3 +7,4 @@ htmlcov/
 dist/
 build/
 .venv/
+executorlib_cache*/

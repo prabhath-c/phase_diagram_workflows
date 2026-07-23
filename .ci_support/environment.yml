@@ -19,6 +19,11 @@ dependencies:
   - matplotlib
   - iprpy-data
 
+  # Potential data, for the real-LAMMPS integration tests in
+  # tests/test_convex_hull.py (lammpsparser.get_potential_by_name).
+  # Not on PyPI, conda-forge only.
+  - iprpy-data
+
   # Development dependencies
   - pytest
   - pytest-cov

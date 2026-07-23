@@ -109,7 +109,15 @@ jobs:
 
     - name: Install package
       shell: bash -el {0}
-      run: pip install -e .[dev,executor,plotting]
+      # Editable install: coverage's `source = ["src/phase_diagram_workflows"]`
+      # (pyproject.toml) only records hits for code actually executed from
+      # that path. A regular `pip install .` copies the package into
+      # site-packages, so tests run against that copy instead -- coverage.py
+      # then finds 0 executions under src/, reporting every line as a miss
+      # even though the tests genuinely passed (reproduced locally: forcing
+      # an import from a separate non-editable copy makes every single line
+      # in the XML report hits="0").
+      run: pip install -e .[dev,executor]
 
     - name: Run tests
       shell: bash -el {0}
