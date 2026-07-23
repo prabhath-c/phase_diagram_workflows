@@ -20,12 +20,16 @@ dependencies = [
     "pandas",
     "lammpsparser",
     "ruamel.yaml",
-    "pydantic>=2,<3"
+    "pydantic>=2,<3",
+    "scipy"
 ]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "black", "ruff", "mypy"]
 executor = ["executorlib>=1.0.0", "pylammpsmpi>=0.1.0"]
+atomistics = ["atomistics"]
+materials_project = ["mp-api", "pymatgen"]
+plotting = ["plotly", "seaborn", "matplotlib"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/phase_diagram_workflows"]
