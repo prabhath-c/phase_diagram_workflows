@@ -26,7 +26,14 @@ dependencies = [
 
 [project.optional-dependencies]
 executor = ["executorlib>=1.0.0", "pylammpsmpi>=0.1.0"]
-atomistics = ["atomistics"]
+# atomistics[lammps] (not bare atomistics) so pip's resolver actually sees
+# atomistics' own pylammpsmpi/lammpsparser upper bounds -- without it,
+# pip has no reason to keep those below whatever atomistics.calculators.lammps
+# was actually tested against, and can silently pick versions with breaking
+# API changes atomistics' own import-warning wrapper then swallows (surfacing
+# as `atomistics.calculators` having no `lammps` attribute at import time,
+# not as an install-time conflict).
+atomistics = ["atomistics[lammps]"]
 materials_project = ["mp-api", "pymatgen"]
 plotting = ["plotly", "seaborn", "matplotlib"]
 # The test suite mocks mp-api/atomistics/executorlib at their call boundary
