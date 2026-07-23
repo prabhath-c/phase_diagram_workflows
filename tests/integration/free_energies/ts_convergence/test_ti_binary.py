@@ -1,11 +1,27 @@
 """
 Integration tests for phase_diagram_workflows.free_energies.ts_convergence.ti_binary.
 
-Every test here runs a real, small, fast calphy calculation (Al, EAM
-potential via lammpsparser's iprpy database, ~100 equilibration/switching
-steps) instead of fabricating result files -- so they exercise the real
-forward/backward TI output format, real executor timing, and real disk
-state, not a guessed approximation of any of them.
+Every test here exercises the real forward/backward TI output format, real
+executor timing, and real disk state -- not a guessed approximation of any of
+them. But a real calphy calculation is genuinely expensive (real LAMMPS MD,
+even at ~100 equilibration/switching steps), and most of what this file
+tests is bracket *bookkeeping* (pending/converged/resubmitted decisions,
+narrowing, chaining) rather than physics: the same real result is a valid
+stand-in for "a real result at this bracket" regardless of which bracket's
+directory it's read back from, since none of these tests assert anything
+about the specific numeric criterion value, only its comparison against
+generous/deterministically-unreachable tolerances (see `ts_overlap_criterion`
+-- always >= 0, so a real result is always "converged" under a generous
+tolerance and never "converged" under a negative one).
+
+So only a handful of tests -- the ones testing real async executor timing
+(genuine SingleNodeExecutor, a real background thread/subprocess) or
+submit_bracket's own real wiring -- run calphy themselves. Everything else
+reuses the single real result computed once by `real_ts_result_source`,
+either via `StubResultExecutor` (for code paths where the executor is hand
+the real function directly) or via `_patch_real_calc` (for the
+self-resubmitting chain, where the real function is called by name from
+inside the submitted task, not passed through the executor).
 """
 
 import matplotlib
@@ -13,6 +29,7 @@ matplotlib.use("Agg")
 
 import math
 import os
+import shutil
 import tempfile
 from concurrent.futures import Future
 from unittest.mock import patch
@@ -25,7 +42,10 @@ from executorlib import SingleNodeExecutor
 from lammpsparser import get_potential_by_name
 
 import phase_diagram_workflows.free_energies.ts_convergence.ti_binary as ti_binary_module
-from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
+from phase_diagram_workflows.free_energies.ti_calculator import (
+    calc_free_energy_with_calphy,
+    gather_calphy_results_detailed,
+)
 from phase_diagram_workflows.free_energies.ts_convergence.ti_binary import (
     _bracket_prefix,
     _bracket_working_directory,
@@ -80,6 +100,61 @@ class _NeverDoneExecutor:
         return Future()
 
 
+class StubResultExecutor:
+    """Like EagerExecutor, but materializes a pre-computed real result
+    instead of rerunning calphy.
+
+    Only valid for code paths (submit_bracket, refine_temperature_bracket,
+    auto_refine_temperature_brackets) that always hand `calc_free_energy_with_calphy`
+    itself to `executor.submit` as `fn` -- this ignores `fn` entirely and
+    copies `source_directory` (a real, already-computed calphy output) to
+    `kwargs["working_directory"]` instead. The copied files are genuine
+    calphy output, still parsed by the real `gather_calphy_results_detailed`,
+    so every downstream assertion about forward/backward TI data sees the
+    real format -- only the ~15s of LAMMPS MD itself is skipped, which is
+    fine for tests asserting bracket bookkeeping (pending/converged/
+    resubmitted), not physics.
+    """
+
+    def __init__(self, source_directory):
+        self.source_directory = source_directory
+        self.submit_calls = []
+
+    def submit(self, fn, **kwargs):
+        self.submit_calls.append(kwargs)
+        working_directory = kwargs["working_directory"]
+        future = Future()
+        try:
+            shutil.copytree(self.source_directory, working_directory)
+            df = gather_calphy_results_detailed(working_directory)
+            future.set_result((None, df))
+        except Exception as exc:  # pragma: no cover - surfaced via future.result()
+            future.set_exception(exc)
+        return future
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        pass
+
+
+def _fake_calc_free_energy_with_calphy(source_directory):
+    """Build a drop-in replacement for calc_free_energy_with_calphy that
+    materializes `source_directory` (a real, already-computed calphy run)
+    instead of running calphy again.
+
+    Used to patch `ti_binary_module.calc_free_energy_with_calphy` for the
+    self-resubmitting chain, where the real function is called by name from
+    *inside* the submitted task (`_calc_and_maybe_resubmit`), not handed to
+    the executor -- so a stub executor (as used for the other entry points)
+    can't intercept it; the module-level name has to be patched instead.
+    """
+
+    def _fake(*, input_structure, potential_df, calphy_parameters, working_directory):
+        shutil.copytree(source_directory, working_directory)
+        return None, gather_calphy_results_detailed(working_directory)
+
+    return _fake
+
+
 def _make_row(atoms, c_in=0.1, phase_type="fcc", reference_phase="solid"):
     return pd.Series({
         "main_element": "Al", "mixing_element": "Mg",
@@ -97,6 +172,36 @@ def potential_df():
 @pytest.fixture(scope="module")
 def small_structure():
     return bulk("Al", cubic=True).repeat(2)  # 32 atoms: small and fast
+
+
+@pytest.fixture(scope="module")
+def real_ts_result_source(small_structure, potential_df, tmp_path_factory):
+    """A single real, small, fast ts-mode calphy run, computed once and
+    reused (read-only, via copies) as the "real result" for every bracket in
+    every test that only cares about bracket bookkeeping rather than
+    physics. See module docstring for why reusing one real result across
+    differently-named brackets is valid here."""
+    working_directory = str(tmp_path_factory.mktemp("real_ts_result_source"))
+    calc_free_energy_with_calphy(
+        input_structure=small_structure,
+        potential_df=potential_df,
+        calphy_parameters={
+            "mode": "ts",
+            "temperature": [700.0, 720.0],
+            "pressure": 0,
+            "n_equilibration_steps": 100,
+            "n_switching_steps": 100,
+            "n_print_steps": 25,
+            "equilibration_control": "berendsen",
+            "md": {"thermostat_damping": 0.5},
+            "tolerance": {"spring_constant": 0.01, "pressure": 0.5},
+            "queue": {"cores": 1, "scheduler": "local"},
+            "reference_phase": "solid",
+            "file_format": "lammps-data",
+        },
+        working_directory=working_directory,
+    )
+    return working_directory
 
 
 @pytest.fixture
@@ -146,14 +251,14 @@ class TestSubmitBracket:
 
 class TestRefineTemperatureBracketReal:
     def test_first_call_always_submits_and_reports_pending(
-        self, small_structure, potential_df, base_ts_params, tmp_path
+        self, small_structure, potential_df, base_ts_params, tmp_path, real_ts_result_source
     ):
         # Nothing on disk yet, so the very first call can only submit
         # fire-and-forget and report "pending" -- regardless of how fast
         # the executor happens to run the work underneath it, since this
         # function never checks the executor's Future at all.
         row = _make_row(small_structure, c_in=0.1)
-        executor = EagerExecutor()
+        executor = StubResultExecutor(real_ts_result_source)
 
         result = refine_temperature_bracket(
             row=row,
@@ -170,9 +275,11 @@ class TestRefineTemperatureBracketReal:
         assert result["bracket"] == (700.0, 720.0)
         assert len(executor.submit_calls) == 1
 
-    def test_converges_on_the_call_after_submission(self, small_structure, potential_df, base_ts_params, tmp_path):
+    def test_converges_on_the_call_after_submission(
+        self, small_structure, potential_df, base_ts_params, tmp_path, real_ts_result_source
+    ):
         row = _make_row(small_structure, c_in=0.1)
-        executor = EagerExecutor()
+        executor = StubResultExecutor(real_ts_result_source)
 
         refine_temperature_bracket(
             row=row, calphy_parameters=base_ts_params, potential_df=potential_df,
@@ -191,10 +298,10 @@ class TestRefineTemperatureBracketReal:
         assert result["bracket"] == (700.0, 720.0)
 
     def test_resubmits_then_resolves_narrowed_bracket_on_next_call(
-        self, small_structure, potential_df, base_ts_params, tmp_path
+        self, small_structure, potential_df, base_ts_params, tmp_path, real_ts_result_source
     ):
         row = _make_row(small_structure, c_in=0.2)
-        executor = EagerExecutor()
+        executor = StubResultExecutor(real_ts_result_source)
         tolerance = -1.0  # deterministically unreachable (criterion is abs(...), always >= 0)
 
         first = refine_temperature_bracket(
@@ -223,7 +330,7 @@ class TestRefineTemperatureBracketReal:
         # unreachable tolerance ever justified going past (700, 720) in the
         # first place; there's no reason to keep treating that as settled
         # once a looser tolerance is in effect.
-        third_executor = EagerExecutor()
+        third_executor = StubResultExecutor(real_ts_result_source)
         third = refine_temperature_bracket(
             row=row,
             calphy_parameters=base_ts_params,
@@ -261,7 +368,9 @@ class TestRefineTemperatureBracketReal:
 
 
 class TestAutoRefineTemperatureBrackets:
-    def test_all_rows_converge_in_first_round(self, small_structure, potential_df, base_ts_params, tmp_path):
+    def test_all_rows_converge_in_first_round(
+        self, small_structure, potential_df, base_ts_params, tmp_path, real_ts_result_source
+    ):
         structures_df = pd.DataFrame([
             _make_row(small_structure, c_in=0.1),
             _make_row(small_structure, c_in=0.2),
@@ -271,7 +380,7 @@ class TestAutoRefineTemperatureBrackets:
             structures_df=structures_df,
             calphy_parameters=base_ts_params,
             potential_df=potential_df,
-            executor=EagerExecutor(),
+            executor=StubResultExecutor(real_ts_result_source),
             working_directory_root=str(tmp_path),
             initial_bracket=(700.0, 720.0),
             tolerance=1.0,  # generous: converges immediately
@@ -284,7 +393,7 @@ class TestAutoRefineTemperatureBrackets:
         assert (result_df["bracket"] == (700.0, 720.0)).all()
 
     def test_gives_up_after_max_iterations_without_raising(
-        self, small_structure, potential_df, base_ts_params, tmp_path
+        self, small_structure, potential_df, base_ts_params, tmp_path, real_ts_result_source
     ):
         structures_df = pd.DataFrame([_make_row(small_structure, c_in=0.3)])
 
@@ -292,7 +401,7 @@ class TestAutoRefineTemperatureBrackets:
             structures_df=structures_df,
             calphy_parameters=base_ts_params,
             potential_df=potential_df,
-            executor=EagerExecutor(),
+            executor=StubResultExecutor(real_ts_result_source),
             working_directory_root=str(tmp_path),
             initial_bracket=(700.0, 740.0),
             tolerance=1e-12,  # unreachable: never converges
@@ -306,7 +415,9 @@ class TestAutoRefineTemperatureBrackets:
         # on the first, (700,730)->(700,720) on the second, then it stops.
         assert row["bracket"] == (700.0, 720.0)
 
-    def test_independent_rows_progress_concurrently(self, small_structure, potential_df, base_ts_params, tmp_path):
+    def test_independent_rows_progress_concurrently(
+        self, small_structure, potential_df, base_ts_params, tmp_path, real_ts_result_source
+    ):
         # One row converges immediately; the other needs one narrowing step.
         # Both should be driven in the same call, not one-at-a-time.
         structures_df = pd.DataFrame([
@@ -316,7 +427,7 @@ class TestAutoRefineTemperatureBrackets:
 
         calls = []
 
-        class RecordingEagerExecutor(EagerExecutor):
+        class RecordingStubExecutor(StubResultExecutor):
             def submit(self, fn, **kwargs):
                 calls.append(kwargs["working_directory"])
                 return super().submit(fn, **kwargs)
@@ -325,7 +436,7 @@ class TestAutoRefineTemperatureBrackets:
             structures_df=structures_df,
             calphy_parameters=base_ts_params,
             potential_df=potential_df,
-            executor=RecordingEagerExecutor(),
+            executor=RecordingStubExecutor(real_ts_result_source),
             working_directory_root=str(tmp_path),
             initial_bracket=(700.0, 720.0),
             tolerance=1.0,
@@ -412,7 +523,23 @@ class TestSubmitSelfResubmittingBracket:
     "submit and walk away" mode, as opposed to auto_refine_temperature_brackets
     (which blocks in the caller) or refine_temperature_bracket (which expects
     to be called again by hand).
+
+    Every test here is about that chaining/reuse *bookkeeping*, not physics,
+    so `calc_free_energy_with_calphy` -- which `_calc_and_maybe_resubmit`
+    calls directly by name rather than receiving from the executor, so
+    `StubResultExecutor` can't intercept it -- is patched at the module level
+    for the whole class (see `_fast_physics` below). Real async executor
+    timing is covered separately, without this patch, in
+    `TestSubmitSelfResubmittingBracketRealExecutor`.
     """
+
+    @pytest.fixture(autouse=True)
+    def _fast_physics(self, real_ts_result_source, monkeypatch):
+        monkeypatch.setattr(
+            ti_binary_module,
+            "calc_free_energy_with_calphy",
+            _fake_calc_free_energy_with_calphy(real_ts_result_source),
+        )
 
     def test_converges_without_chaining(self, small_structure, potential_df, base_ts_params, tmp_path):
         row = _make_row(small_structure, c_in=0.8)
@@ -586,6 +713,13 @@ class TestSubmitSelfResubmittingBracket:
         tried = sorted(_find_tried_brackets(working_directory_root, prefix))
         assert tried == [(700.0, 720.0), (700.0, 730.0), (700.0, 740.0)]
 
+class TestSubmitSelfResubmittingBracketRealExecutor:
+    """Kept separate from TestSubmitSelfResubmittingBracket specifically so
+    it's exempt from that class's autouse `_fast_physics` patch: this test is
+    about real async executor timing/cloudpickle round-tripping, not chain
+    bookkeeping, so it needs the genuine calc_free_energy_with_calphy.
+    """
+
     def test_converges_with_real_async_executor(self, small_structure, potential_df, base_ts_params, tmp_path):
         # Proves executor_factory genuinely round-trips through cloudpickle
         # to wherever _calc_and_maybe_resubmit actually executes, using a
@@ -626,10 +760,12 @@ class TestSubmitSelfResubmittingBracket:
 
 
 @pytest.fixture(scope="module")
-def criterion_sweep(small_structure, potential_df, tmp_path_factory):
-    """Runs one real, small sweep: one concentration that converges
-    immediately, one that needs a single resubmission. Shared across the
-    criterion-table/plotting tests so the real calphy calls happen once.
+def criterion_sweep(small_structure, potential_df, real_ts_result_source, tmp_path_factory):
+    """One concentration that converges immediately, one that needs a single
+    resubmission -- reusing `real_ts_result_source` via `StubResultExecutor`
+    rather than running calphy again, since these tests are about the
+    criterion-table/plotting bookkeeping, not physics. Shared (module scope)
+    across all of TestCriterionTableAndPlots.
     """
     working_directory_root = str(tmp_path_factory.mktemp("criterion_sweep"))
     base_params = {
@@ -654,7 +790,7 @@ def criterion_sweep(small_structure, potential_df, tmp_path_factory):
     # Two calls each: the first only submits (nothing on disk yet, so it can
     # only report "pending"); the second reads the now-available result and
     # decides converged/resubmitted.
-    executor0 = EagerExecutor()
+    executor0 = StubResultExecutor(real_ts_result_source)
     for _ in range(2):
         refine_temperature_bracket(
             row=structures_df.iloc[0],
@@ -667,7 +803,7 @@ def criterion_sweep(small_structure, potential_df, tmp_path_factory):
             step_upper=10.0,
         )
 
-    executor1 = EagerExecutor()
+    executor1 = StubResultExecutor(real_ts_result_source)
     for _ in range(2):
         refine_temperature_bracket(
             row=structures_df.iloc[1],
