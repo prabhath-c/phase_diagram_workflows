@@ -5,6 +5,7 @@ from typing import Dict, Any, Tuple, Optional, List
 from pathlib import Path
 
 import numpy as np
+import pylammpsmpi
 import yaml
 from ase.atoms import Atoms
 from calphy import Calculation
@@ -17,6 +18,29 @@ from phase_diagram_workflows.free_energies.ti_helpers import (
     _validate_potential_df,
     _validate_calphy_parameters,
 )
+
+# calphy's own internal LAMMPS driver (calphy/helpers.py) constructs
+# pylammpsmpi.LammpsLibrary without passing hostname_localhost, so it
+# inherits pylammpsmpi's default of advertising the machine's real hostname
+# (via socket.gethostname()) for its own internal executor/worker process to
+# zmq-connect back to, instead of localhost. On an ephemeral CI runner the
+# worker can fail to resolve/connect to that hostname; the connection just
+# retries silently rather than raising, so the calculation hangs instead of
+# failing. This is the same class of issue pylammpsmpi's own test suite
+# works around by passing hostname_localhost=True explicitly wherever it
+# nests a LAMMPS wrapper inside its own executor (see pyiron/pylammpsmpi
+# tests/test_executor.py). calphy exposes no parameter to pass this through,
+# so it's patched here, once, for every calphy calculation this package runs.
+_original_lammps_library_init = pylammpsmpi.LammpsLibrary.__init__
+
+
+def _lammps_library_init_with_localhost_default(self, *args, hostname_localhost=None, **kwargs):
+    if hostname_localhost is None:
+        hostname_localhost = True
+    _original_lammps_library_init(self, *args, hostname_localhost=hostname_localhost, **kwargs)
+
+
+pylammpsmpi.LammpsLibrary.__init__ = _lammps_library_init_with_localhost_default
 
 def _run_calphy(input_class: Calculation, lmp: Optional[Any] = None) -> None:
     """Execute calphy calculation based on the input configuration.

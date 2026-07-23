@@ -43,6 +43,7 @@ plotting = ["plotly", "seaborn", "matplotlib"]
 dev = [
     "pytest",
     "pytest-cov",
+    "pytest-timeout",
     "black",
     "ruff",
     "mypy",
