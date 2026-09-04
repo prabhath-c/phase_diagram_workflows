@@ -34,7 +34,7 @@ def _run_calphy(input_class: Calculation, lmp: Optional[Any] = None) -> None:
     ------
     ValueError
         If reference_phase is not 'solid' or 'liquid'
-        If mode is not 'fe' (free energy) or 'ts' (temperature scaling)
+        If mode is not 'fe' (free energy), 'ts' (temperature scaling), or 'composition_scaling'
     RuntimeError
         If calphy execution fails
     """
@@ -44,9 +44,19 @@ def _run_calphy(input_class: Calculation, lmp: Optional[Any] = None) -> None:
 
     with _working_directory_context(working_directory):
         try:
-            from calphy import Solid, Liquid
-            from calphy.routines import routine_fe, routine_ts
-            if input_class.reference_phase == "solid":
+            from calphy import Solid, Liquid, Alchemy
+            from calphy.routines import routine_fe, routine_ts, routine_composition_scaling
+
+            # mode dictates the job class, matching calphy's own dispatch in
+            # calphy/queuekernel.py: "alchemy"/"composition_scaling" always run
+            # through Alchemy (it owns the switching + MC-swap + mass_integration
+            # machinery), regardless of reference_phase.
+            if input_class.mode == "composition_scaling":
+                if lmp is not None:
+                    job = Alchemy(calculation=input_class, simfolder=working_directory, lmp=lmp)
+                else:
+                    job = Alchemy(calculation=input_class, simfolder=working_directory)
+            elif input_class.reference_phase == "solid":
                 if lmp is not None:
                     job = Solid(calculation=input_class, simfolder=working_directory, lmp=lmp)
                 else:
@@ -66,9 +76,11 @@ def _run_calphy(input_class: Calculation, lmp: Optional[Any] = None) -> None:
                 routine_fe(job)
             elif input_class.mode == "ts":
                 routine_ts(job)
+            elif input_class.mode == "composition_scaling":
+                routine_composition_scaling(job)
             else:
                 raise ValueError(
-                    f"Invalid mode: {input_class.mode}. Must be 'fe' or 'ts'"
+                    f"Invalid mode: {input_class.mode}. Must be 'fe', 'ts', or 'composition_scaling'"
                 )
         except ValueError:
             raise
@@ -230,7 +242,9 @@ def calc_free_energy_with_calphy(
         DataFrame containing potential information in pyiron-compatible format
     calphy_parameters : Dict[str, Any]
         Dictionary with calphy parameters including:
-        - mode: 'fe' (free energy) or 'ts' (temperature scaling)
+        - mode: 'fe' (free energy), 'ts' (temperature scaling), or 'composition_scaling'
+          (alchemical composition transformation with MC identity-exchange swaps;
+          requires 'composition_scaling' and 'monte_carlo' blocks, see calphy.Calculation)
         - temperature: float or list for temperature range
         - reference_phase: 'solid' or 'liquid'
         - n_equilibration_steps, n_switching_steps, n_print_steps

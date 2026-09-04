@@ -577,3 +577,98 @@ class TestExecutorIntegration:
             'additional_field': 'extra_value'
         }
         _validate_metadata(extended_metadata)  # Should not raise
+
+
+class TestRunCalphyDispatch:
+    """Unit tests for _run_calphy's job-class dispatch logic.
+
+    mode="composition_scaling" must always route to calphy's Alchemy class (it owns the
+    switching + MC-swap + mass_integration machinery, per calphy/queuekernel.py's own
+    dispatch), regardless of reference_phase -- not to Solid/Liquid, which never had that
+    machinery and silently produced physically-wrong results for this mode.
+    """
+
+    @staticmethod
+    def _make_input_class(mode, reference_phase, lattice_path):
+        mock_input = Mock()
+        mock_input.mode = mode
+        mock_input.reference_phase = reference_phase
+        mock_input.lattice = lattice_path
+        return mock_input
+
+    @patch('calphy.routines.routine_composition_scaling')
+    @patch('calphy.Alchemy')
+    @patch('calphy.Solid')
+    @patch('calphy.Liquid')
+    def test_composition_scaling_dispatches_to_alchemy_not_solid(
+        self, mock_liquid, mock_solid, mock_alchemy, mock_routine_cs
+    ):
+        from phase_diagram_workflows.free_energies.ti_calculator import _run_calphy
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lattice_path = os.path.join(tmpdir, 'input_structure.data')
+            input_class = self._make_input_class('composition_scaling', 'solid', lattice_path)
+            mock_job = Mock()
+            mock_alchemy.return_value = mock_job
+
+            _run_calphy(input_class=input_class)
+
+            mock_alchemy.assert_called_once_with(calculation=input_class, simfolder=tmpdir)
+            mock_solid.assert_not_called()
+            mock_liquid.assert_not_called()
+            mock_routine_cs.assert_called_once_with(mock_job)
+
+    @patch('calphy.routines.routine_composition_scaling')
+    @patch('calphy.Alchemy')
+    @patch('calphy.Liquid')
+    def test_composition_scaling_dispatches_to_alchemy_not_liquid(
+        self, mock_liquid, mock_alchemy, mock_routine_cs
+    ):
+        """reference_phase='liquid' should not matter either -- mode alone decides."""
+        from phase_diagram_workflows.free_energies.ti_calculator import _run_calphy
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lattice_path = os.path.join(tmpdir, 'input_structure.data')
+            input_class = self._make_input_class('composition_scaling', 'liquid', lattice_path)
+            mock_alchemy.return_value = Mock()
+
+            _run_calphy(input_class=input_class)
+
+            mock_alchemy.assert_called_once_with(calculation=input_class, simfolder=tmpdir)
+            mock_liquid.assert_not_called()
+
+    @patch('calphy.routines.routine_composition_scaling')
+    @patch('calphy.Alchemy')
+    def test_composition_scaling_passes_lmp_through_to_alchemy(
+        self, mock_alchemy, mock_routine_cs
+    ):
+        from phase_diagram_workflows.free_energies.ti_calculator import _run_calphy
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lattice_path = os.path.join(tmpdir, 'input_structure.data')
+            input_class = self._make_input_class('composition_scaling', 'solid', lattice_path)
+            sentinel_lmp = Mock(name='lmp')
+            mock_alchemy.return_value = Mock()
+
+            _run_calphy(input_class=input_class, lmp=sentinel_lmp)
+
+            mock_alchemy.assert_called_once_with(
+                calculation=input_class, simfolder=tmpdir, lmp=sentinel_lmp
+            )
+
+    @patch('calphy.routines.routine_fe')
+    @patch('calphy.Solid')
+    def test_fe_mode_still_dispatches_to_solid(self, mock_solid, mock_routine_fe):
+        """Regression check: composition_scaling's new branch must not affect fe/ts."""
+        from phase_diagram_workflows.free_energies.ti_calculator import _run_calphy
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lattice_path = os.path.join(tmpdir, 'input_structure.data')
+            input_class = self._make_input_class('fe', 'solid', lattice_path)
+            mock_job = Mock()
+            mock_solid.return_value = mock_job
+
+            _run_calphy(input_class=input_class)
+
+            mock_solid.assert_called_once_with(calculation=input_class, simfolder=tmpdir)
+            mock_routine_fe.assert_called_once_with(mock_job)
