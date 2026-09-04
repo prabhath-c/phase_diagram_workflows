@@ -95,3 +95,71 @@ class TestCompositionScalingRealCalphy:
         assert row["free_energy"] == pytest.approx(0.0, abs=1.0)
         assert row["free_energy"] == row["free_energy"]  # not NaN
         assert row["composition"]["Mg"] == pytest.approx(n_mg_target / n_atoms, abs=1e-6)
+
+
+class TestCompositionScalingWithExternalLmp:
+    """mode="composition_scaling" through an externally-managed
+    pylammpsmpi session (execution_mode="library", lmp=<SingleNodeExecutor-
+    backed LammpsLibrary>) should produce the same kind of sane result as
+    the plain path in TestCompositionScalingRealCalphy."""
+
+    def test_runs_to_completion_with_sane_free_energy(
+        self, al_mg_eam_potential_df, tmp_path
+    ):
+        from executorlib import SingleNodeExecutor
+        from pylammpsmpi import LammpsLibrary, init_function
+
+        structure = bulk("Al", cubic=True).repeat(4)  # 256 atoms
+        n_atoms = len(structure)
+        n_mg_target = 5
+        cores = 2
+
+        calphy_parameters = {
+            "mode": "composition_scaling",
+            "temperature": 300,
+            "n_equilibration_steps": 5000,
+            "n_switching_steps": 5000,
+            "n_print_steps": 0,
+            "equilibration_control": "nose-hoover",
+            "execution_mode": "library",
+            "queue": {"cores": cores, "scheduler": "local"},
+            "reference_phase": "solid",
+            "file_format": "lammps-data",
+            "reference_composition": 0.0,
+            "composition_scaling": {
+                "output_chemical_composition": {
+                    "Al": n_atoms - n_mg_target,
+                    "Mg": n_mg_target,
+                },
+            },
+            "monte_carlo": {
+                "n_steps": 20,
+                "n_swaps": 20,
+                "use_custom_lammps": False,
+            },
+        }
+
+        with SingleNodeExecutor(
+            block_allocation=True,
+            hostname_localhost=True,
+            max_workers=1,
+            init_function=init_function,
+            cache_directory=str(tmp_path / "executorlib_cache"),
+            resource_dict={"cores": cores, "cwd": str(tmp_path)},
+        ) as executor:
+            lmp = LammpsLibrary(cores=cores, executor=executor)
+            calculation, df = calc_free_energy_with_calphy(
+                input_structure=structure,
+                potential_df=al_mg_eam_potential_df,
+                calphy_parameters=calphy_parameters,
+                working_directory=str(tmp_path),
+                lmp=lmp,
+            )
+
+        row = df.iloc[0]
+        assert bool(row["status"]) is True
+        assert row["calculation_mode"] == "composition_scaling"
+        assert row["reference_phase"] == "solid"
+        assert row["free_energy"] == pytest.approx(0.0, abs=1.0)
+        assert row["free_energy"] == row["free_energy"]  # not NaN
+        assert row["composition"]["Mg"] == pytest.approx(n_mg_target / n_atoms, abs=1e-6)
