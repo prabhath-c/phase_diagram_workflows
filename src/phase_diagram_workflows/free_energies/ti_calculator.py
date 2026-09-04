@@ -44,9 +44,19 @@ def _run_calphy(input_class: Calculation, lmp: Optional[Any] = None) -> None:
 
     with _working_directory_context(working_directory):
         try:
-            from calphy import Solid, Liquid
+            from calphy import Solid, Liquid, Alchemy
             from calphy.routines import routine_fe, routine_ts, routine_composition_scaling
-            if input_class.reference_phase == "solid":
+
+            # mode dictates the job class, matching calphy's own dispatch in
+            # calphy/queuekernel.py: "alchemy"/"composition_scaling" always run
+            # through Alchemy (it owns the switching + MC-swap + mass_integration
+            # machinery), regardless of reference_phase.
+            if input_class.mode == "composition_scaling":
+                if lmp is not None:
+                    job = Alchemy(calculation=input_class, simfolder=working_directory, lmp=lmp)
+                else:
+                    job = Alchemy(calculation=input_class, simfolder=working_directory)
+            elif input_class.reference_phase == "solid":
                 if lmp is not None:
                     job = Solid(calculation=input_class, simfolder=working_directory, lmp=lmp)
                 else:
