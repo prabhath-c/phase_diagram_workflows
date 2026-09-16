@@ -58,6 +58,40 @@ def check_ts_overlap(
     return bool(ts_overlap_criterion(forward_energy_diff, backward_energy_diff) <= tolerance)
 
 
+def scale_steps_to_bracket_width(
+    n_steps: int,
+    reference_bracket: Tuple[float, float],
+    bracket: Tuple[float, float],
+) -> int:
+    """Scale a step count so steps-per-degree stays constant as a bracket narrows.
+
+    `n_steps` is read as the count appropriate for `reference_bracket`'s own
+    width (e.g. the initial bracket a sweep started from); the returned
+    count is `n_steps` scaled by `bracket`'s width relative to that
+    reference, rounded to the nearest integer. A bracket exactly as wide as
+    `reference_bracket` (including `bracket == reference_bracket`) is always
+    a no-op.
+
+    Parameters
+    ----------
+    n_steps : int
+        The step count appropriate for `reference_bracket`'s width.
+    reference_bracket : Tuple[float, float]
+        The `(t_low, t_high)` bracket `n_steps` was calibrated for -- e.g.
+        the initial bracket a sweep started from.
+    bracket : Tuple[float, float]
+        The `(t_low, t_high)` bracket to scale `n_steps` for.
+
+    Returns
+    -------
+    int
+        `n_steps` scaled to `bracket`'s width, rounded to the nearest integer.
+    """
+    reference_width = reference_bracket[1] - reference_bracket[0]
+    width = bracket[1] - bracket[0]
+    return round(n_steps * width / reference_width)
+
+
 def step_bracket(
     t_low: float,
     t_high: float,
