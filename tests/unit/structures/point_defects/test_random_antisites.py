@@ -1,5 +1,5 @@
 """
-Unit tests for phase_diagram_workflows.structures.point_defects.random_alloys.
+Unit tests for phase_diagram_workflows.structures.point_defects.random_antisites.
 """
 
 import numpy as np
@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 from ase.build import bulk
 
-from phase_diagram_workflows.structures.point_defects.random_alloys import (
+from phase_diagram_workflows.structures.point_defects.random_antisites import (
     generate_random_binary_structures,
     get_element_fractions,
 )

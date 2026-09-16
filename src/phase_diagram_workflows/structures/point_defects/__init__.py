@@ -9,7 +9,7 @@ Point-defect structure creation on top of a StructureContainer.
   (and their `_batch` variants) to actually build defect structures.
 - `formation_energy`: `compute_formation_energy` and the `delta_n_for_*`
   helpers -- chemical-potential bookkeeping shared by every defect type.
-- `random_alloys`: one-shot random substitutional composition sweeps
+- `random_antisites`: one-shot random antisite-substitution composition sweeps
   (`generate_random_binary_structures`), independent of `StructureContainer`.
 
 The most commonly used names are re-exported here; submodules remain
@@ -65,7 +65,7 @@ from .formation_energy import (
     delta_n_for_substitution,
     delta_n_for_vacancy,
 )
-from .random_alloys import generate_random_binary_structures, get_element_fractions
+from .random_antisites import generate_random_binary_structures, get_element_fractions
 from .sites import (
     discover_atomic_sublattices,
     discover_interstitial_sublattices,
