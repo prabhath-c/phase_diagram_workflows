@@ -43,10 +43,11 @@ plotting = ["plotly", "seaborn", "matplotlib"]
 dev = [
     "pytest",
     "pytest-cov",
+    "pytest-timeout",
     "black",
     "ruff",
     "mypy",
-    "phase_diagrams_workflows[atomistics,materials_project,plotting]",
+    "phase_diagrams_workflows[atomistics,materials_project,plotting,executor]",
 ]
 
 [tool.hatch.build.targets.wheel]
