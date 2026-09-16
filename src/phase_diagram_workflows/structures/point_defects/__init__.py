@@ -7,6 +7,8 @@ Point-defect structure creation on top of a StructureContainer.
   sublattice discovery/tiling.
 - `defects`: `create_vacancy`/`create_substitution`/`create_interstitial`
   (and their `_batch` variants) to actually build defect structures.
+- `formation_energy`: `compute_formation_energy` and the `delta_n_for_*`
+  helpers -- chemical-potential bookkeeping shared by every defect type.
 - `random_alloys`: one-shot random substitutional composition sweeps
   (`generate_random_binary_structures`), independent of `StructureContainer`.
 
@@ -56,6 +58,12 @@ from .defects import (
     create_substitution_batch,
     create_vacancy,
     create_vacancy_batch,
+)
+from .formation_energy import (
+    compute_formation_energy,
+    delta_n_for_interstitial,
+    delta_n_for_substitution,
+    delta_n_for_vacancy,
 )
 from .random_alloys import generate_random_binary_structures, get_element_fractions
 from .sites import (
@@ -107,6 +115,10 @@ __all__ = [
     "create_substitution_batch",
     "create_vacancy",
     "create_vacancy_batch",
+    "compute_formation_energy",
+    "delta_n_for_interstitial",
+    "delta_n_for_substitution",
+    "delta_n_for_vacancy",
     "discover_atomic_sublattices",
     "discover_interstitial_sublattices",
     "get_delaunay_interstitial_sites",
