@@ -34,3 +34,4 @@ dependencies:
   # Executor dependencies
   - executorlib>=1.0.0
   - pylammpsmpi>=0.1.0
+  - h5py  # required by executorlib's cache_directory path
