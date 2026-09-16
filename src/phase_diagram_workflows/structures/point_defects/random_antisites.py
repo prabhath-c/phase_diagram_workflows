@@ -1,3 +1,21 @@
+"""
+Random antisite-substitution structure generation (composition sweeps).
+
+`generate_random_binary_structures` hits a list of target concentrations by
+randomly substituting `main_element` <-> `mixing_element` atoms -- i.e.
+random *antisite* defects, not a general random-alloy generator (that would
+be its `'reshuffle'` mode, a full re-randomization of the whole structure at
+fixed composition, which is not the default and not what most callers want).
+
+Unlike the rest of `point_defects` (single, individually tracked defects via
+`StructureContainer`), this generates one-shot structures at each target
+concentration directly from a base structure, with no lineage tracking --
+for building composition sweeps (e.g. Al-Mg antisite structures from 0 to
+100% Mg) rather than single-defect formation-energy structures.
+
+Carried over from an earlier notebook module as-is.
+"""
+
 import numpy as np
 import pandas as pd
 
@@ -10,11 +28,11 @@ def get_element_fractions(atoms, element=None):
     total = len(atoms)
 
     if element is not None:
-        fraction = {element: atoms.symbols.count(element)/total}
+        fraction = {element: atoms.symbols.count(element) / total}
         return fraction
 
     elements = set(atoms.get_chemical_symbols())
-    fraction = {el: atoms.symbols.count(el)/total for el in elements}
+    fraction = {el: atoms.symbols.count(el) / total for el in elements}
 
     return fraction
 

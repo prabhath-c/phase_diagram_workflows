@@ -36,6 +36,11 @@ executor = ["executorlib>=1.0.0", "pylammpsmpi>=0.1.0"]
 atomistics = ["atomistics[lammps]"]
 materials_project = ["mp-api", "pymatgen"]
 plotting = ["plotly", "seaborn", "matplotlib"]
+# spglib: symmetry-unique sublattice discovery (discover_atomic_sublattices,
+# discover_interstitial_sublattices). Interstitial site finding itself
+# (get_voronoi_interstitial_sites, get_delaunay_interstitial_sites) is pure
+# scipy/numpy -- no extra dependency needed.
+point_defects = ["spglib"]
 # The test suite mocks mp-api/atomistics/executorlib at their call boundary
 # rather than skipping them, so these need to be importable (never actually
 # called for real) wherever tests run -- hence dev pulling in the other
@@ -47,7 +52,7 @@ dev = [
     "black",
     "ruff",
     "mypy",
-    "phase_diagrams_workflows[atomistics,materials_project,plotting,executor]",
+    "phase_diagrams_workflows[atomistics,materials_project,plotting,executor,point_defects]",
 ]
 
 [tool.hatch.build.targets.wheel]
