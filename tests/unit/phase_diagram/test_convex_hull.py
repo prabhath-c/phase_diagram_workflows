@@ -350,6 +350,26 @@ class TestPlaceLabelsNoOverlap:
         assert any(needs_leader)
         assert not all(needs_leader)
 
+    def test_max_rings_exhausted_falls_back_to_last_candidate(self):
+        # With max_rings=1 there are only two candidates per label (one
+        # ring's above/below pair). Three labels at the exact same point
+        # force the third to run through both candidates, find both
+        # occupied, and exit the search loop by exhaustion rather than by
+        # `break` -- the fallback path that keeps whatever the last
+        # candidate offset/annotation was.
+        fig, ax = plt.subplots(figsize=(3, 3))
+        ax.set_xlim(0.3, 0.5)
+        ax.set_ylim(-0.05, 0.05)
+        entries = [
+            {"x": 0.4, "y": 0.0, "text": "Beta", "color": "black"},
+            {"x": 0.4, "y": 0.0, "text": "Epsilon", "color": "black"},
+            {"x": 0.4, "y": 0.0, "text": "Gamma", "color": "black"},
+        ]
+
+        annotations = _place_labels_no_overlap(fig, ax, entries, max_rings=1)
+
+        assert [a.get_text() for a in annotations] == ["Beta", "Epsilon", "Gamma"]
+
 
 class TestPlotConvexHull:
     def test_returns_figure_and_hull(self):
