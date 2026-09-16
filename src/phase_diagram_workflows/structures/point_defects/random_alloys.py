@@ -1,3 +1,16 @@
+"""
+Random substitutional-alloy structure generation (composition sweeps).
+
+Unlike the rest of `point_defects` (single, individually tracked defects via
+`StructureContainer`), this generates one-shot random substitutional
+structures at a list of target concentrations directly from a base
+structure, with no lineage tracking -- for building composition sweeps (e.g.
+random Al-Mg solid solutions from 0 to 100% Mg) rather than single-defect
+formation-energy structures.
+
+Carried over from an earlier `jackall`-based notebook module as-is.
+"""
+
 import numpy as np
 import pandas as pd
 
@@ -10,11 +23,11 @@ def get_element_fractions(atoms, element=None):
     total = len(atoms)
 
     if element is not None:
-        fraction = {element: atoms.symbols.count(element)/total}
+        fraction = {element: atoms.symbols.count(element) / total}
         return fraction
 
     elements = set(atoms.get_chemical_symbols())
-    fraction = {el: atoms.symbols.count(el)/total for el in elements}
+    fraction = {el: atoms.symbols.count(el) / total for el in elements}
 
     return fraction
 
