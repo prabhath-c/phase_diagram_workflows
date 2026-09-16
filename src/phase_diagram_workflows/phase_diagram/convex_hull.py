@@ -19,13 +19,151 @@ _HULL_COLOR = "black"
 _OFF_HULL_COLOR = "#b0afaa"
 
 
-def _structure_color() -> str:
-    """The single accent color for hull-point labels, read live from
-    seaborn's 'muted' palette (slot 0) -- the same palette landau.plot uses.
+def _structure_color(index: int = 0) -> str:
+    """An accent color for hull-point labels, read live from seaborn's
+    'muted' palette -- the same palette landau.plot uses. Slot 0 (the
+    default) is the primary series; a DFT overlay (see `dft_mixing_energy_col`
+    on the plot functions) uses slot 1 so the two series stay visually
+    distinct but drawn from the same consistent palette.
     """
     import seaborn as sns
 
-    return sns.color_palette("muted").as_hex()[0]
+    return sns.color_palette("muted").as_hex()[index]
+
+
+_SUBSCRIPT_DIGITS = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
+
+
+def _subscript_digits(text: str) -> str:
+    """Render a chemical formula's atom counts as subscripts, e.g.
+    'Mg23Al30' -> 'Mg₂₃Al₃₀'.
+
+    Uses plain Unicode subscript characters rather than matplotlib mathtext
+    (`$_{23}$`): mathtext renders in a different font to the surrounding
+    bold label text, so mixing the two within one string produces a visibly
+    inconsistent, clashing look. Unicode subscripts stay in the same font
+    as everything else.
+    """
+    return text.translate(_SUBSCRIPT_DIGITS)
+
+
+def _place_labels_no_overlap(
+    fig,
+    ax,
+    entries: List[Dict[str, Any]],
+    base_offset: float = 9.0,
+    step: float = 9.0,
+    max_rings: int = 20,
+):
+    """Annotate points with text labels, placing each to avoid overlap.
+
+    For each label (processed left-to-right by x), tries a sequence of
+    candidate vertical offsets -- above the point first, then below, then
+    further above, then further below, and so on outward -- taking the
+    first one whose text doesn't overlap any label already placed. Most
+    labels land at the first (closest, no-nudge) candidate on one side or
+    the other; only genuinely crowded spots need to go further out. A
+    label only gets a leader line back to its point when it had to go
+    beyond the immediate above/below pair -- the common case (an
+    uncontested spot right above or right below the point) needs no line,
+    which is exactly what a plain `ax.annotate` would have done, just also
+    trying below instead of only ever pushing labels further above.
+
+    Processing points in a fixed left-to-right order and never re-touching
+    an already-placed label means each label's search only depends on
+    labels already resolved -- unlike resolving arbitrary overlapping pairs
+    against each other, which can oscillate two labels back into the same
+    offset instead of converging.
+
+    Parameters
+    ----------
+    fig, ax : matplotlib Figure/Axes
+        Must belong to a canvas that supports `get_renderer()` (true for the
+        default Agg/interactive backends).
+    entries : List[Dict[str, Any]]
+        One dict per label, with keys 'x', 'y', 'text', 'color', and
+        optionally 'path_effects' (defaults to a white outline stroke).
+    base_offset : float
+        Vertical offset in points of the closest above/below candidates.
+    step : float
+        How far out (in points) each successive ring of candidates goes.
+    max_rings : int
+        Safety cap on how many above/below rings to try for any single
+        label, for pathological inputs; typical hull sizes (a handful of
+        points, moderate overlap) resolve within the first ring or two.
+
+    Returns
+    -------
+    List[matplotlib.text.Annotation]
+        The final annotation objects, in `entries` order (not sweep order).
+    """
+    import matplotlib.patheffects as patheffects
+
+    default_outline = [patheffects.withStroke(linewidth=3, foreground="white")]
+
+    def draw(entry: Dict[str, Any], offset: float) -> Any:
+        return ax.annotate(
+            entry["text"],
+            xy=(entry["x"], entry["y"]),
+            xytext=(0, offset),
+            textcoords="offset points",
+            ha="center",
+            va="center",
+            fontsize="small",
+            fontweight="bold",
+            color=entry["color"],
+            path_effects=entry.get("path_effects", default_outline),
+            zorder=10,
+        )
+
+    def candidate_offsets():
+        for ring in range(max_rings):
+            yield base_offset + ring * step
+            yield -(base_offset + ring * step)
+
+    if not entries:
+        return []
+
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+
+    annotations: List[Any] = [None] * len(entries)
+    offsets = [base_offset] * len(entries)
+    placed_bboxes: List[Any] = []
+
+    for i in sorted(range(len(entries)), key=lambda idx: entries[idx]["x"]):
+        for offset in candidate_offsets():
+            ann = draw(entries[i], offset)
+            bbox = ann.get_window_extent(renderer)
+            if not any(bbox.overlaps(placed) for placed in placed_bboxes):
+                break
+            ann.remove()
+        annotations[i] = ann
+        offsets[i] = offset
+        placed_bboxes.append(bbox)
+
+    # A label only gets a leader line if it needed a ring beyond the
+    # immediate above/below pair -- keeps the common case (an uncontested
+    # spot right above or below) identical to a plain, line-free annotate.
+    for i, entry in enumerate(entries):
+        if abs(abs(offsets[i]) - base_offset) > 1e-9:
+            annotations[i].remove()
+            annotations[i] = ax.annotate(
+                entry["text"],
+                xy=(entry["x"], entry["y"]),
+                xytext=(0, offsets[i]),
+                textcoords="offset points",
+                ha="center",
+                va="center",
+                fontsize="small",
+                fontweight="bold",
+                color=entry["color"],
+                path_effects=entry.get("path_effects", default_outline),
+                zorder=10,
+                arrowprops=dict(arrowstyle="-", color=entry["color"], lw=0.6, alpha=0.6, shrinkA=1, shrinkB=3),
+            )
+
+    return annotations
 
 # -----------------------------------------------------------------------
 # Per-structure energy calculation (atomistics lib calculator, LAMMPS)
@@ -369,11 +507,12 @@ def plot_convex_hull(
     energy_col: str = "mixing_energy",
     label_col: Optional[str] = "formula_pretty",
     color_col: Optional[str] = None,
+    dft_mixing_energy_col: Optional[str] = None,
     hover_cols: Optional[Tuple[str, ...]] = None,
     fig_width: int = 800,
     fig_height: int = 550,
     yrange: Optional[Tuple[float, float]] = None,
-    max_energy_above_hull: Optional[float] = 0.2,
+    max_energy_above_hull: Optional[float] = None,
     element: Optional[str] = None,
     xlabel: Optional[str] = None,
     ylabel: Optional[str] = None,
@@ -404,6 +543,13 @@ def plot_convex_hull(
         If given, color *all* points by this column instead of the default
         gray/accent status styling -- useful for ad hoc exploration (e.g.
         'space_group'), not recommended for a final figure with many groups.
+    dft_mixing_energy_col : Optional[str]
+        Column holding a second, already-computed mixing energy to overlay
+        as a comparison hull trace -- e.g. one built from Materials
+        Project's own `energy_per_atom` (see `compute_mixing_energy`),
+        alongside the primary `energy_col`. Drawn as a dashed line with
+        square markers, labeled "Convex hull (DFT)". None (default) omits
+        it entirely.
     hover_cols : Optional[Tuple[str, ...]]
         Columns to show on hover. Defaults to scalar-typed columns of `df`.
     fig_width, fig_height : int
@@ -411,10 +557,12 @@ def plot_convex_hull(
     yrange : Optional[Tuple[float, float]]
         Y-axis range as (min, max). Overrides `max_energy_above_hull`.
     max_energy_above_hull : Optional[float]
-        When `yrange` is not given, caps the y-axis at `hull_max +
-        max_energy_above_hull` instead of the full data range, so a few
-        badly-relaxed outliers can't squash the hull into a thin band at
-        the bottom (see `_default_yrange`). None auto-scales to all data.
+        None (default): auto-scale the y-axis to all data. When `yrange`
+        is not given and this is a float instead, caps the y-axis at
+        `hull_max + max_energy_above_hull` so a few badly-relaxed outliers
+        can't squash the hull into a thin band at the bottom (see
+        `_default_yrange`) -- opt into this if auto-scaling looks bad for
+        your data, rather than it being the default.
     element : Optional[str]
         The element `x_col` is the fraction of (e.g. "Mg"). If given, the
         default x-label becomes the LaTeX `$x_\mathrm{Mg}$` (see
@@ -440,17 +588,28 @@ def plot_convex_hull(
     df_plot = df.dropna(subset=[x_col, energy_col]).copy()
     df_hull = compute_convex_hull(df_plot, x_col=x_col, energy_col=energy_col)
 
-    if yrange is not None:
+    def warn_if_clips(hull, col, label):
+        if yrange is None:
+            return
         lo, hi = yrange
-        clipped = df_hull[(df_hull[energy_col] < lo) | (df_hull[energy_col] > hi)]
+        clipped = hull[(hull[col] < lo) | (hull[col] > hi)]
         if not clipped.empty:
             warnings.warn(
-                f"yrange={yrange} clips {len(clipped)} hull point(s) with "
-                f"{energy_col} outside that range (e.g. {clipped[energy_col].iloc[0]:.4g}); "
+                f"yrange={yrange} clips {len(clipped)} {label} hull point(s) with "
+                f"{col} outside that range (e.g. {clipped[col].iloc[0]:.4g}); "
                 "pass a wider yrange or None to auto-scale.",
-                stacklevel=2,
+                stacklevel=3,
             )
-    else:
+
+    warn_if_clips(df_hull, energy_col, "primary")
+
+    df_hull_dft = None
+    if dft_mixing_energy_col is not None:
+        df_dft_plot = df.dropna(subset=[x_col, dft_mixing_energy_col]).copy()
+        df_hull_dft = compute_convex_hull(df_dft_plot, x_col=x_col, energy_col=dft_mixing_energy_col)
+        warn_if_clips(df_hull_dft, dft_mixing_energy_col, "DFT")
+
+    if yrange is None:
         yrange = _default_yrange(df_hull, energy_col, max_energy_above_hull)
 
     default_xlabel, default_ylabel = _default_axis_labels(x_col, energy_col, element=element, latex=False)
@@ -511,13 +670,29 @@ def plot_convex_hull(
             y=df_hull[energy_col],
             mode="lines+markers" + ("+text" if label_col else ""),
             name="Convex hull",
-            text=df_hull[label_col] if label_col else None,
+            text=df_hull[label_col].astype(str).map(_subscript_digits) if label_col else None,
             textposition="top center",
             textfont=dict(size=12, color=_structure_color()),
             line=dict(color=_HULL_COLOR, width=1.5, dash="dot"),
             marker=dict(size=7, color=_HULL_COLOR),
         )
     )
+
+    if df_hull_dft is not None:
+        dft_color = _structure_color(1)
+        fig.add_trace(
+            go.Scatter(
+                x=df_hull_dft[x_col],
+                y=df_hull_dft[dft_mixing_energy_col],
+                mode="lines+markers" + ("+text" if label_col else ""),
+                name="Convex hull (DFT)",
+                text=df_hull_dft[label_col].astype(str).map(_subscript_digits) if label_col else None,
+                textposition="bottom center",
+                textfont=dict(size=12, color=dft_color),
+                line=dict(color=dft_color, width=1.5, dash="dash"),
+                marker=dict(size=8, symbol="square-open", color=dft_color),
+            )
+        )
 
     fig.update_layout(
         xaxis_title=xlabel,
@@ -541,8 +716,9 @@ def plot_convex_hull_matplotlib(
     x_col: str = "x",
     energy_col: str = "mixing_energy",
     label_col: Optional[str] = "formula_pretty",
+    dft_mixing_energy_col: Optional[str] = None,
     yrange: Optional[Tuple[float, float]] = None,
-    max_energy_above_hull: Optional[float] = 0.2,
+    max_energy_above_hull: Optional[float] = None,
     element: Optional[str] = None,
     xlabel: Optional[str] = None,
     ylabel: Optional[str] = None,
@@ -566,13 +742,27 @@ def plot_convex_hull_matplotlib(
     label_col : Optional[str]
         Column to label hull points with (e.g. 'formula_pretty'). None to
         omit labels.
+    dft_mixing_energy_col : Optional[str]
+        Column holding a second, already-computed mixing energy to overlay
+        as a comparison hull -- e.g. one built from Materials Project's own
+        `energy_per_atom` (see `compute_mixing_energy`), alongside the
+        primary `energy_col` (typically your own potential's energies). Drawn
+        as a dashed hull with open-square markers in a second accent color
+        (`_structure_color(1)`), its own labels, and a small legend
+        distinguishing the two hulls -- omitted (no legend) when None, so
+        the single-series case is pixel-identical to before this option
+        existed. Off-hull points for this series are not plotted (only its
+        hull), so the DFT overlay reads as a comparison line rather than a
+        second full point cloud.
     yrange : Optional[Tuple[float, float]]
         Y-axis range as (min, max). Overrides `max_energy_above_hull`.
     max_energy_above_hull : Optional[float]
-        When `yrange` is not given, caps the y-axis at `hull_max +
-        max_energy_above_hull` instead of the full data range, so a few
-        badly-relaxed outliers can't squash the hull into a thin band at
-        the bottom (see `_default_yrange`). None auto-scales to all data.
+        None (default): auto-scale the y-axis to all data. When `yrange`
+        is not given and this is a float instead, caps the y-axis at
+        `hull_max + max_energy_above_hull` so a few badly-relaxed outliers
+        can't squash the hull into a thin band at the bottom (see
+        `_default_yrange`) -- opt into this if auto-scaling looks bad for
+        your data, rather than it being the default.
     element : Optional[str]
         The element `x_col` is the fraction of (e.g. "Mg"). If given, the
         default x-label becomes the LaTeX `$x_\mathrm{Mg}$` (see
@@ -592,27 +782,41 @@ def plot_convex_hull_matplotlib(
     fig : matplotlib.figure.Figure
     ax : matplotlib.axes.Axes
     df_hull : pd.DataFrame
-        Rows of `df` on the lower hull (see `compute_convex_hull`).
+        Rows of `df` on the lower hull for `energy_col` (see
+        `compute_convex_hull`). The DFT overlay's hull (when
+        `dft_mixing_energy_col` is given) is only plotted, not returned --
+        call `compute_convex_hull` on that column yourself if you need it.
     """
     import warnings
 
-    import matplotlib.patheffects as patheffects
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
     df_plot = df.dropna(subset=[x_col, energy_col]).copy()
     df_hull = compute_convex_hull(df_plot, x_col=x_col, energy_col=energy_col)
 
-    if yrange is not None:
+    def warn_if_clips(hull, col, label):
+        if yrange is None:
+            return
         lo, hi = yrange
-        clipped = df_hull[(df_hull[energy_col] < lo) | (df_hull[energy_col] > hi)]
+        clipped = hull[(hull[col] < lo) | (hull[col] > hi)]
         if not clipped.empty:
             warnings.warn(
-                f"yrange={yrange} clips {len(clipped)} hull point(s) with "
-                f"{energy_col} outside that range (e.g. {clipped[energy_col].iloc[0]:.4g}); "
+                f"yrange={yrange} clips {len(clipped)} {label} hull point(s) with "
+                f"{col} outside that range (e.g. {clipped[col].iloc[0]:.4g}); "
                 "pass a wider yrange or None to auto-scale.",
-                stacklevel=2,
+                stacklevel=3,
             )
-    else:
+
+    warn_if_clips(df_hull, energy_col, "primary")
+
+    df_hull_dft = None
+    if dft_mixing_energy_col is not None:
+        df_dft_plot = df.dropna(subset=[x_col, dft_mixing_energy_col]).copy()
+        df_hull_dft = compute_convex_hull(df_dft_plot, x_col=x_col, energy_col=dft_mixing_energy_col)
+        warn_if_clips(df_hull_dft, dft_mixing_energy_col, "DFT")
+
+    if yrange is None:
         yrange = _default_yrange(df_hull, energy_col, max_energy_above_hull)
 
     default_xlabel, default_ylabel = _default_axis_labels(x_col, energy_col, element=element, latex=True)
@@ -624,10 +828,10 @@ def plot_convex_hull_matplotlib(
     else:
         fig = ax.figure
 
-    structure_color = _structure_color()
+    structure_color = _structure_color(0)
     # Landau's common-tangent styling for the hull (see plot_excess_free_energy):
     # black dotted line, lw=1.5, zorder=3; black hull-vertex dots, s=25,
-    # zorder=7; labels via _text_with_outline's own defaults (fontsize
+    # zorder=7; labels via _place_labels_no_overlap's own defaults (fontsize
     # "small", bold, 3px white stroke, zorder=10). Off-hull structures are
     # small, light gray, recessive context -- not part of landau's scheme
     # (which has no "off the hull" cloud to de-emphasize).
@@ -644,22 +848,46 @@ def plot_convex_hull_matplotlib(
         color=_HULL_COLOR, s=25, zorder=7,
     )
 
+    dft_color = _structure_color(1)
+    if df_hull_dft is not None:
+        ax.plot(
+            df_hull_dft[x_col], df_hull_dft[dft_mixing_energy_col],
+            linestyle="dashed", color=dft_color, linewidth=1.5, zorder=4,
+        )
+        ax.scatter(
+            df_hull_dft[x_col], df_hull_dft[dft_mixing_energy_col],
+            marker="s", facecolors="none", edgecolors=dft_color, linewidths=1.3, s=36, zorder=8,
+        )
+
     if label_col:
-        outline = [patheffects.withStroke(linewidth=3, foreground="white")]
-        for _, row in df_hull.iterrows():
-            ax.annotate(
-                str(row[label_col]),
-                xy=(row[x_col], row[energy_col]),
-                xytext=(0, 9),
-                textcoords="offset points",
-                ha="center",
-                va="center",
-                fontsize="small",
-                fontweight="bold",
-                color=structure_color,
-                path_effects=outline,
-                zorder=10,
-            )
+        label_entries = [
+            {
+                "x": row[x_col], "y": row[energy_col],
+                "text": _subscript_digits(str(row[label_col])), "color": structure_color,
+            }
+            for _, row in df_hull.iterrows()
+        ]
+        if df_hull_dft is not None:
+            label_entries += [
+                {
+                    "x": row[x_col], "y": row[dft_mixing_energy_col],
+                    "text": _subscript_digits(str(row[label_col])), "color": dft_color,
+                }
+                for _, row in df_hull_dft.iterrows()
+            ]
+        _place_labels_no_overlap(fig, ax, label_entries)
+
+    if df_hull_dft is not None:
+        ax.legend(
+            handles=[
+                Line2D([0], [0], color=_HULL_COLOR, marker="o", linestyle="dotted", label="Convex hull"),
+                Line2D(
+                    [0], [0], color=dft_color, marker="s", markerfacecolor="none",
+                    linestyle="dashed", label="Materials Project (DFT)",
+                ),
+            ],
+            frameon=False, fontsize="small", loc="best",
+        )
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -720,6 +948,11 @@ def fetch_structures_and_energies(
         `structures.materials_project.append_structure`.
     include_pure, fields
         Forwarded to `structures.materials_project.get_materials_project_df`.
+        With `fields=None` (the default), the result already includes MP's
+        own `formation_energy_per_atom` and `energy_above_hull` alongside
+        the raw `energy_per_atom` -- no second API call needed. See
+        `analyze_convex_hull`'s `dft_energy_col` for which of these is the
+        right one to use for a DFT comparison.
     task_fn
         Forwarded to `compute_energies_with_nested_executor`.
     **run_nested_batch_kwargs
@@ -765,6 +998,7 @@ def analyze_convex_hull(
     energy_col: str = "energy_per_atom_calc",
     mixing_energy_col: str = "mixing_energy",
     label_col: Optional[str] = "formula_pretty",
+    dft_energy_col: Optional[str] = None,
     backend: str = "plotly",
     **plot_kwargs: Any,
 ):
@@ -782,6 +1016,33 @@ def analyze_convex_hull(
         `compute_mixing_energy`).
     label_col : Optional[str]
         Column to label hull points with. None to omit labels.
+    dft_energy_col : Optional[str]
+        Name of a per-atom energy column to overlay as a comparison hull.
+        None (default) omits it -- the single-series plot is unchanged.
+        Two columns are meaningful here when `df` comes from
+        `fetch_structures_and_energies` (both present for free, no second
+        API call -- `fields=None` there already fetches everything):
+        - `"formation_energy_per_atom"` (recommended): Materials Project's
+          own, already-hull-consistent formation energy -- the same value
+          their website's phase diagram is built from. Verified directly
+          against MP's own `is_stable`/`energy_above_hull` fields; using it
+          here reproduces MP's actual hull rather than re-deriving one.
+          (An earlier version of this feature re-derived a hull from
+          `get_entries_in_chemsys` restricted to GGA/GGA+U entries -- that
+          disagreed with MP's real numbers by ~10-20 meV/atom for some
+          compounds, enough to misjudge which compositions are stable.
+          Don't do that; this field is already correct.)
+        - `"energy_per_atom"` (MP's *raw*, uncorrected energy): mixes
+          entries computed with different DFT functionals (GGA/GGA+U/
+          r2SCAN) on incompatible absolute scales, most visibly for the
+          pure-element endpoints -- anchoring a mixing-energy calculation
+          to those can put compounds far off any sane hull. Useful mainly
+          to demonstrate that problem, not as a real comparison.
+        Whichever column is passed, its mixing energy is computed the same
+        way as the primary series (anchored to its own lowest-energy
+        x=0/x=1 entries) into `f"{mixing_energy_col}_dft"`, then plotted as
+        a second, dashed hull. (`formation_energy_per_atom` is already ~0
+        at the endpoints, so this re-anchoring is a harmless no-op for it.)
     backend : str
         'plotly' (interactive, `plot_convex_hull`) or 'matplotlib' (static,
         publication-style, `plot_convex_hull_matplotlib`).
@@ -793,16 +1054,29 @@ def analyze_convex_hull(
     For backend='plotly': `(fig, df_hull)` (see `plot_convex_hull`).
     For backend='matplotlib': `(fig, ax, df_hull)` (see
     `plot_convex_hull_matplotlib`).
+    `df_hull` is always the primary (`energy_col`) hull -- the DFT overlay is
+    plotted but not returned; call `compute_mixing_energy` +
+    `compute_convex_hull` on `dft_energy_col` yourself if you need its hull
+    as a dataframe.
     """
     df_mix = compute_mixing_energy(df, x_col=x_col, energy_col=energy_col, mixing_energy_col=mixing_energy_col)
 
+    dft_mixing_energy_col = None
+    if dft_energy_col is not None:
+        dft_mixing_energy_col = f"{mixing_energy_col}_dft"
+        df_mix = compute_mixing_energy(
+            df_mix, x_col=x_col, energy_col=dft_energy_col, mixing_energy_col=dft_mixing_energy_col
+        )
+
     if backend == "plotly":
         return plot_convex_hull(
-            df_mix, x_col=x_col, energy_col=mixing_energy_col, label_col=label_col, **plot_kwargs
+            df_mix, x_col=x_col, energy_col=mixing_energy_col, label_col=label_col,
+            dft_mixing_energy_col=dft_mixing_energy_col, **plot_kwargs
         )
     elif backend == "matplotlib":
         return plot_convex_hull_matplotlib(
-            df_mix, x_col=x_col, energy_col=mixing_energy_col, label_col=label_col, **plot_kwargs
+            df_mix, x_col=x_col, energy_col=mixing_energy_col, label_col=label_col,
+            dft_mixing_energy_col=dft_mixing_energy_col, **plot_kwargs
         )
     else:
         raise ValueError(f"Unknown backend: {backend!r}. Use 'plotly' or 'matplotlib'.")
