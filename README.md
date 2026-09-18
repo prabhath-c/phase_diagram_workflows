@@ -18,7 +18,11 @@ The package offers both traditional serial execution and advanced parallel execu
 ## 🚀 **Features**
 
 ### **Core Functionality**
-- ✅ **Free Energy Calculations**: Solid, liquid, and interface free energy calculations
+- ✅ **Free Energy Calculations**: Thermodynamic-integration (TI) free-energy calculations via Calphy, with automatic temperature-scaling bracket convergence (`free_energies`)
+- 🧬 **Point Defects**: Vacancy/substitution/interstitial structure creation, interstitial site discovery, and formation-energy bookkeeping (`structures.point_defects`)
+- 📈 **Phase Diagrams**: Composition-energy convex hull construction, with DFT overlay support (`phase_diagram`)
+- 🌐 **Materials Project Integration**: Structure queries against the Materials Project database (`structures.materials_project`)
+- 🔗 **Workflows**: Multi-step pipelines chaining the building blocks above into end-to-end calculations, runnable step-by-step or all at once (`workflows`)
 - 🚀 **Executor Support**: Parallel execution via executorlib for HPC environments
 
 ## 📦 **Installation**
@@ -41,22 +45,42 @@ pip install -e .
 - `pydantic` - Data validation and settings management
 
 ### **Optional Dependencies**
-- `executorlib` - Parallel execution framework (executor feature)
-- `pylammpsmpi` - MPI-enabled LAMMPS library (executor feature)
+- `executorlib`, `pylammpsmpi` - Parallel execution framework (`executor` extra)
+- `atomistics[lammps]` - LAMMPS-based calculators (`atomistics` extra)
+- `mp-api`, `pymatgen` - Materials Project queries (`materials_project` extra)
+- `plotly`, `seaborn`, `matplotlib` - Plotting (`plotting` extra)
+- `spglib` - Symmetry-unique sublattice discovery for point defects (`point_defects` extra)
 
 
 ## 📂 **Project Structure**
+
+The package separates the actual work -- single-purpose building-block
+functions -- from workflows -- multi-step pipelines that chain those
+functions together:
+
 ```
 phase_diagram_workflows/
 ├── src/
 │   └── phase_diagram_workflows/
-│       ├── calculator.py      # Main calculation functions
-│       ├── helpers.py         # Utility functions
-│       └── __init__.py
-├── notebooks/                # Example notebooks
-├── tests/                    # Unit tests
-├── pyproject.toml            # Project configuration
-└── README.md                 # This file
+│       ├── free_energies/        # TI free-energy calculations (Calphy)
+│       │   ├── ti_calculator.py      # Run a TI calculation, gather results
+│       │   ├── ti_helpers.py         # Structure/composition validation, LAMMPS I/O
+│       │   └── ts_convergence/       # Temperature-scaling bracket refinement
+│       ├── phase_diagram/        # Phase diagram construction
+│       │   ├── convex_hull.py        # Composition-energy convex hull, DFT overlay
+│       │   └── defect_diagram.py
+│       ├── structures/           # Structure generation and management
+│       │   ├── materials_project.py  # Materials Project structure queries
+│       │   └── point_defects/        # Vacancy/substitution/interstitial creation,
+│       │                             # interstitial site discovery, formation-energy
+│       │                             # bookkeeping
+│       ├── workflows/            # Multi-step pipelines built on the modules above
+│       │                         # (e.g. TI convergence -> formation-energy calculation)
+│       └── utils/                # Shared helpers (nested batch execution, ...)
+├── notebooks/                    # Example notebooks
+├── tests/                        # Unit + integration tests (mirrors src/ layout)
+├── pyproject.toml                # Project configuration
+└── README.md                     # This file
 ```
 
 ## 🔬 **Examples**
@@ -64,6 +88,9 @@ phase_diagram_workflows/
 Check out the example notebooks in the `notebooks/` directory:
 
 - **[Al_free_energy_executor_demo.ipynb](notebooks/Al_free_energy_executor_demo.ipynb)** - Demonstrates executor integration
+- **[Al_point_defects_demo.ipynb](notebooks/Al_point_defects_demo.ipynb)** - Point-defect structure creation and formation energies
+- **[ts_convergence_single_demo.ipynb](notebooks/ts_convergence_single_demo.ipynb)** - Temperature-scaling bracket convergence
+- **[ConvexHull_MaterialsProject.ipynb](notebooks/ConvexHull_MaterialsProject.ipynb)** - Convex hull construction with Materials Project data
 
 ## 🤝 **Contributing**
 
