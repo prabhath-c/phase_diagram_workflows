@@ -33,6 +33,9 @@ def _make_structure_dict(species, coords, lattice=((4, 0, 0), (0, 4, 0), (0, 0, 
 def _mock_doc(**fields):
     doc = MagicMock()
     doc.model_dump.return_value = fields
+    # get_materials_project_df reads material_id via the attribute (str(doc.material_id)),
+    # not through model_dump() -- see its docstring for why -- so the mock needs both.
+    doc.material_id = fields.get("material_id")
     return doc
 
 
@@ -97,6 +100,25 @@ class TestGetMaterialsProjectDf:
         df = get_materials_project_df("Al-Mg", "dummy-key", include_pure=True)
 
         assert len(df) == 1
+
+    @patch("mp_api.client.MPRester")
+    def test_material_id_uses_the_attribute_not_model_dump(self, mock_mprester_cls):
+        # Regression test: MP's MPID type mis-serializes under model_dump()
+        # (a padded internal encoding, e.g. "mp-aaaaaafe") but stringifies
+        # correctly via the attribute itself ("mp-134") -- the mismatch
+        # silently broke matching these IDs against any other MP API call
+        # (e.g. fetch_mp_formation_energies) until this was fixed to read
+        # the attribute directly.
+        mock_mprester = MagicMock()
+        mock_mprester_cls.return_value.__enter__.return_value = mock_mprester
+        doc = MagicMock()
+        doc.model_dump.return_value = {"material_id": "mp-aaaaaafe", "formula_pretty": "Al"}
+        doc.material_id = "mp-134"
+        mock_mprester.materials.summary.search.return_value = [doc]
+
+        df = get_materials_project_df("Al", "dummy-key", include_pure=False)
+
+        assert df["material_id"].tolist() == ["mp-134"]
 
     @patch("mp_api.client.MPRester")
     def test_forwards_fields_and_api_key(self, mock_mprester_cls):
