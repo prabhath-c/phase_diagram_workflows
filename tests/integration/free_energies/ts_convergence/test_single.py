@@ -43,7 +43,7 @@ from phase_diagram_workflows.free_energies.ts_convergence.single import (
     _find_tried_brackets,
     refine_temperature_bracket_manually,
     submit_bracket,
-    submit_bracket_chain,
+    refine_temperature_bracket_with_chain,
 )
 
 
@@ -76,7 +76,7 @@ class DependencyResolvingEagerExecutor(EagerExecutor):
     """Like EagerExecutor, but also resolves Future-valued kwargs before
     calling fn, emulating (synchronously) the DependencyTaskScheduler
     behavior that SingleNodeExecutor/SlurmClusterExecutor/FluxClusterExecutor
-    all provide by default. submit_bracket_chain relies on that resolution
+    all provide by default. refine_temperature_bracket_with_chain relies on that resolution
     -- each step's `previous_result` kwarg is the raw Future from the step
     before it -- so a plain EagerExecutor (which just calls fn(**kwargs)
     with whatever it's given, Future or not) isn't a valid stand-in here.
@@ -354,8 +354,8 @@ class TestRefineTemperatureBracketReal:
         assert result["bracket"] == (700.0, 720.0)
 
 
-class TestSubmitBracketChain:
-    """submit_bracket_chain precomputes the full candidate bracket sequence
+class TestRefineWithChain:
+    """refine_temperature_bracket_with_chain precomputes the full candidate bracket sequence
     and submits every step at once, each depending on the previous step's
     Future -- as opposed to `refine_temperature_bracket_manually` (which
     expects to be called again by hand) or the old recursive
@@ -369,7 +369,7 @@ class TestSubmitBracketChain:
     for the whole class (see `_fast_physics` below). Real async executor
     timing (including genuine dependency resolution across several hops) is
     covered separately, without this patch, in
-    `TestSubmitBracketChainRealExecutor`.
+    `TestRefineWithChainRealExecutor`.
     """
 
     @pytest.fixture(autouse=True)
@@ -385,7 +385,7 @@ class TestSubmitBracketChain:
     ):
         working_directory_root = str(tmp_path)
 
-        futures, working_directory = submit_bracket_chain(
+        futures, working_directory = refine_temperature_bracket_with_chain(
             input_structure=small_structure,
             calphy_parameters=base_ts_params,
             potential_df=potential_df,
@@ -417,7 +417,7 @@ class TestSubmitBracketChain:
         # collapse (700 -> 715 -> 710, never reaching a zero-width bracket),
         # so this test is purely about the max_iterations bound, not the
         # collapse behavior covered separately below.
-        futures, _ = submit_bracket_chain(
+        futures, _ = refine_temperature_bracket_with_chain(
             input_structure=small_structure,
             calphy_parameters=base_ts_params,
             potential_df=potential_df,
@@ -450,7 +450,7 @@ class TestSubmitBracketChain:
         # running it.
         working_directory_root = str(tmp_path)
 
-        futures, _ = submit_bracket_chain(
+        futures, _ = refine_temperature_bracket_with_chain(
             input_structure=small_structure,
             calphy_parameters=base_ts_params,
             potential_df=potential_df,
@@ -475,7 +475,7 @@ class TestSubmitBracketChain:
         self, small_structure, potential_df, base_ts_params, tmp_path
     ):
         # Regression test for a real bug: a second, independent call to
-        # submit_bracket_chain for the same structure/bracket (e.g. a
+        # refine_temperature_bracket_with_chain for the same structure/bracket (e.g. a
         # notebook cell rerun bootstrapping to whatever's already on disk)
         # must reuse the existing result rather than rerunning calphy.
         # Rerunning is not just wasteful -- calphy's MD is stochastic, so
@@ -486,7 +486,7 @@ class TestSubmitBracketChain:
         # result before a later, redundant one overwrote it.
         working_directory_root = str(tmp_path)
 
-        first_futures, _ = submit_bracket_chain(
+        first_futures, _ = refine_temperature_bracket_with_chain(
             input_structure=small_structure,
             calphy_parameters=base_ts_params,
             potential_df=potential_df,
@@ -503,7 +503,7 @@ class TestSubmitBracketChain:
             "phase_diagram_workflows.free_energies.ts_convergence.single.calc_free_energy_with_calphy",
             wraps=single_module.calc_free_energy_with_calphy,
         ) as spy:
-            second_futures, _ = submit_bracket_chain(
+            second_futures, _ = refine_temperature_bracket_with_chain(
                 input_structure=small_structure,
                 calphy_parameters=base_ts_params,
                 potential_df=potential_df,
@@ -532,7 +532,7 @@ class TestSubmitBracketChain:
         # narrowest on disk -- without recomputing anything.
         working_directory_root = str(tmp_path)
 
-        narrowing_futures, _ = submit_bracket_chain(
+        narrowing_futures, _ = refine_temperature_bracket_with_chain(
             input_structure=small_structure,
             calphy_parameters=base_ts_params,
             potential_df=potential_df,
@@ -551,7 +551,7 @@ class TestSubmitBracketChain:
             "phase_diagram_workflows.free_energies.ts_convergence.single.calc_free_energy_with_calphy",
             wraps=single_module.calc_free_energy_with_calphy,
         ) as spy:
-            looser_futures, working_directory = submit_bracket_chain(
+            looser_futures, working_directory = refine_temperature_bracket_with_chain(
                 input_structure=small_structure,
                 calphy_parameters=base_ts_params,
                 potential_df=potential_df,
@@ -573,8 +573,8 @@ class TestSubmitBracketChain:
         assert tried_after == tried_before  # nothing new landed on disk
 
 
-class TestSubmitBracketChainRealExecutor:
-    """Kept separate from TestSubmitBracketChain specifically so it's exempt
+class TestRefineWithChainRealExecutor:
+    """Kept separate from TestRefineWithChain specifically so it's exempt
     from that class's autouse `_fast_physics` patch: this test is about real
     async executor timing and genuine dependency resolution across several
     hops, not chain bookkeeping, so it needs the genuine
@@ -613,7 +613,7 @@ class TestSubmitBracketChainRealExecutor:
         # real hostname was never needed here anyway.
         executor = SingleNodeExecutor(max_cores=1, hostname_localhost=True)
         try:
-            futures, working_directory = submit_bracket_chain(
+            futures, working_directory = refine_temperature_bracket_with_chain(
                 input_structure=small_structure,
                 calphy_parameters=base_ts_params,
                 potential_df=potential_df,
