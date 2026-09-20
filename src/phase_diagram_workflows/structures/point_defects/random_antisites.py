@@ -16,8 +16,13 @@ for building composition sweeps (e.g. Al-Mg antisite structures from 0 to
 Carried over from an earlier notebook module as-is.
 """
 
+import operator
+
 import numpy as np
 import pandas as pd
+
+from .container import UID_KEY, StructureContainer
+from .defects import create_substitution_batch
 
 
 def get_element_fractions(atoms, element=None):
@@ -137,3 +142,124 @@ def generate_random_binary_structures(
     structures_df = pd.DataFrame(rows)
 
     return structures_df
+
+
+def generate_antisite_structures(
+        base_structure,
+        main_element='Al',
+        mixing_element='Mg',
+        phase_type='fcc',
+        reference_phase='solid',
+        concentrations=None,
+        seed=None):
+    """
+    Random antisite structures at target concentrations of `mixing_element`, built with
+    `create_substitution_batch`.
+
+    Each target concentration is reached from `base_structure` by randomly substituting
+    atoms on either side of it: `main_element` -> `mixing_element` when the target is above the
+    base structure's concentration, `mixing_element` -> `main_element` when it is below. So the
+    base structure may already contain both elements (an intermetallic such as Mg17Al12 can be
+    swept across its stoichiometric composition, to the Al-rich and the Mg-rich side). A target
+    that equals the base composition returns the base structure unchanged.
+
+    Every target starts from the unmodified base structure and is drawn with the seed
+    ``seed + n``, where ``n = round(c * N)`` is its number of `mixing_element` atoms. A structure
+    therefore depends only on the base structure, `seed` and its own composition: adding,
+    removing or reordering other concentrations never changes it (unlike one random stream
+    shared by all targets), and any row can be reproduced by itself. ``seed=None`` draws a random
+    seed; the seed that was used is recorded in the ``seed`` column.
+
+    Parameters
+    ----------
+    base_structure : ase.Atoms
+    main_element, mixing_element : str
+        The two elements. Concentration is the fraction of `mixing_element` (``round(c * N)`` atoms).
+    phase_type, reference_phase : str
+        Stored in the result for later bookkeeping.
+    concentrations : list of float, optional
+        Target fractions of `mixing_element`; default ``[0, 0.5, 1]``.
+    seed : int, optional
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per target concentration: ``symbol``, ``main_element``, ``mixing_element``,
+        ``fractions``, ``c`` (achieved), ``c_in`` (requested), ``atoms``, ``phase_type``,
+        ``reference_phase``, ``approximations`` (``['antisites']`` or ``['stoichiometric']``),
+        ``seed`` (the seed passed in, or drawn), and ``substituted_indices`` (indices of the atoms
+        whose element differs from the base structure).
+
+    Raises
+    ------
+    ValueError
+        If a target cannot be reached (outside [0, 1], or not enough atoms of the element that
+        would have to be replaced), if the two elements are the same, or if `seed` is negative.
+    TypeError
+        If `seed` is not an integer.
+    """
+    if concentrations is None:
+        concentrations = [0, 0.5, 1]
+    if main_element == mixing_element:
+        raise ValueError(f"main_element and mixing_element must differ (both are {main_element!r}).")
+    if seed is None:
+        seed = int(np.random.SeedSequence().entropy % (2 ** 32))
+    else:
+        seed = operator.index(seed)  # TypeError for anything that is not an integer (e.g. 6919.0)
+        if seed < 0:
+            raise ValueError(f"seed must be non-negative, got {seed}.")
+
+    n_sites = len(base_structure)
+    base_symbols = np.array(base_structure.get_chemical_symbols(), dtype=object)
+    n_main = int(np.count_nonzero(base_symbols == main_element))
+    n_mixing = int(np.count_nonzero(base_symbols == mixing_element))
+
+    container = StructureContainer()
+    container.add_pristine(base_structure.copy())
+
+    rows = []
+    for target_conc in concentrations:
+        n_target_mixing = int(round(target_conc * n_sites))
+        delta_n = n_target_mixing - n_mixing
+        if not 0 <= n_target_mixing <= n_sites:
+            raise ValueError(f"Cannot reach concentration {target_conc}: outside 0 to 1.")
+
+        structure_seed = seed + n_target_mixing
+        if delta_n == 0:
+            atoms = base_structure.copy()
+            approx = ['stoichiometric']
+        else:
+            from_element, to_element, available = (
+                (main_element, mixing_element, n_main) if delta_n > 0 else (mixing_element, main_element, n_mixing)
+            )
+            if abs(delta_n) > available:
+                raise ValueError(f"Cannot reach concentration {target_conc}: not enough {from_element} to replace.")
+            container = create_substitution_batch(
+                container,
+                target_indices=[0],
+                to_element=to_element,
+                from_element=from_element,
+                n=abs(delta_n),
+                seed=structure_seed,
+            )
+            atoms = container.get_structure(len(container) - 1)["structure"].copy()
+            atoms.arrays.pop(UID_KEY, None)  # container bookkeeping, not part of the structure
+            approx = ['antisites']
+
+        symbols = np.array(atoms.get_chemical_symbols(), dtype=object)
+        rows.append({
+            'symbol': atoms.get_chemical_formula(),
+            'main_element': main_element,
+            'mixing_element': mixing_element,
+            'fractions': get_element_fractions(atoms),
+            'c': get_element_fractions(atoms, element=mixing_element)[mixing_element],
+            'c_in': target_conc,
+            'atoms': atoms,
+            'phase_type': phase_type,
+            'reference_phase': reference_phase,
+            'approximations': approx,
+            'seed': seed,
+            'substituted_indices': np.flatnonzero(symbols != base_symbols).tolist(),
+        })
+
+    return pd.DataFrame(rows)
