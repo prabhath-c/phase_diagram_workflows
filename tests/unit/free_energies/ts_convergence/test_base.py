@@ -9,6 +9,7 @@ this file.
 import pytest
 
 from phase_diagram_workflows.free_energies.ts_convergence.base import (
+    discover_tolerance,
     check_ts_overlap,
     decide_next_bracket,
     pick_best_converged_bracket,
@@ -111,3 +112,35 @@ class TestPickBestConvergedBracket:
 
     def test_empty_criteria_returns_none(self):
         assert pick_best_converged_bracket({}, tolerance=0.005) is None
+
+
+class TestDiscoverTolerance:
+    # the criteria of the FCC run over 26 concentrations at 1000 K: seven at the noise level, then a jump
+    fcc_first_brackets = [0.0004, 0.0004, 0.0007, 0.0013, 0.0003, 0.0006, 0.0028,
+                          0.0463, 0.0427, 0.0399, 0.0355, 0.0339, 0.0303, 0.0281, 0.0259]
+
+    def test_tolerance_is_the_geometric_mean_across_the_widest_gap(self):
+        tolerance = discover_tolerance(self.fcc_first_brackets)
+        assert tolerance == pytest.approx((0.0028 * 0.0259) ** 0.5)
+        assert 0.0028 < tolerance < 0.0259
+
+    def test_order_and_missing_values_do_not_matter(self):
+        shuffled = list(reversed(self.fcc_first_brackets)) + [None, float("nan")]
+        assert discover_tolerance(shuffled) == discover_tolerance(self.fcc_first_brackets)
+
+    def test_all_good_criteria_have_no_gap(self):
+        with pytest.raises(ValueError, match="No clear gap"):
+            discover_tolerance([0.0004, 0.0006, 0.0009, 0.0011, 0.0016, 0.0021])
+
+    def test_smaller_min_gap_ratio_accepts_a_smaller_gap(self):
+        criteria = [0.0004, 0.0006, 0.0009, 0.0021, 0.0034]
+        with pytest.raises(ValueError):
+            discover_tolerance(criteria)
+        assert discover_tolerance(criteria, min_gap_ratio=2.0) == pytest.approx((0.0009 * 0.0021) ** 0.5)
+
+    def test_too_few_criteria(self):
+        with pytest.raises(ValueError, match="at least 4"):
+            discover_tolerance([0.001, 0.05, 0.06])
+
+    def test_exact_zero_is_a_valid_criterion(self):
+        assert 0.0 < discover_tolerance([0.0, 0.0001, 0.0002, 0.05, 0.06]) < 0.05

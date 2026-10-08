@@ -18,6 +18,15 @@ from phase_diagram_workflows.utils.nested_batch import run_nested_batch
 _HULL_COLOR = "black"
 _OFF_HULL_COLOR = "#b0afaa"
 
+# Text sizing for plot_convex_hull_matplotlib (points, matplotlib fontsize
+# units). Kept as one set of constants so every text element on the static
+# hull plot -- axis labels, tick labels, legend, hull-point labels -- scales
+# together rather than drifting apart.
+_AXIS_LABEL_FONTSIZE = 15
+_TICK_LABEL_FONTSIZE = 13
+_LEGEND_FONTSIZE = 13
+_POINT_LABEL_FONTSIZE = 13
+
 
 def _structure_color(index: int = 0) -> str:
     """An accent color for hull-point labels, read live from seaborn's
@@ -51,9 +60,11 @@ def _place_labels_no_overlap(
     fig,
     ax,
     entries: List[Dict[str, Any]],
-    base_offset: float = 9.0,
-    step: float = 9.0,
+    base_offset: float = 12.0,
+    step: float = 12.0,
     max_rings: int = 20,
+    fontsize: float = _POINT_LABEL_FONTSIZE,
+    avoid_bboxes: Optional[List[Any]] = None,
 ):
     """Annotate points with text labels, placing each to avoid overlap.
 
@@ -91,6 +102,12 @@ def _place_labels_no_overlap(
         Safety cap on how many above/below rings to try for any single
         label, for pathological inputs; typical hull sizes (a handful of
         points, moderate overlap) resolve within the first ring or two.
+    fontsize : float
+        Font size (points) for the labels themselves.
+    avoid_bboxes : Optional[List[Any]]
+        Extra `Bbox`-like regions (e.g. a legend's `get_window_extent()`)
+        to treat as already occupied, so labels are pushed clear of them
+        too, not just of each other.
 
     Returns
     -------
@@ -109,7 +126,7 @@ def _place_labels_no_overlap(
             textcoords="offset points",
             ha="center",
             va="center",
-            fontsize="small",
+            fontsize=fontsize,
             fontweight="bold",
             color=entry["color"],
             path_effects=entry.get("path_effects", default_outline),
@@ -129,7 +146,7 @@ def _place_labels_no_overlap(
 
     annotations: List[Any] = [None] * len(entries)
     offsets = [base_offset] * len(entries)
-    placed_bboxes: List[Any] = []
+    placed_bboxes: List[Any] = list(avoid_bboxes) if avoid_bboxes else []
 
     for i in sorted(range(len(entries)), key=lambda idx: entries[idx]["x"]):
         for offset in candidate_offsets():
@@ -155,7 +172,7 @@ def _place_labels_no_overlap(
                 textcoords="offset points",
                 ha="center",
                 va="center",
-                fontsize="small",
+                fontsize=fontsize,
                 fontweight="bold",
                 color=entry["color"],
                 path_effects=entry.get("path_effects", default_outline),
@@ -859,6 +876,26 @@ def plot_convex_hull_matplotlib(
             marker="s", facecolors="none", edgecolors=dft_color, linewidths=1.3, s=36, zorder=8,
         )
 
+    # Legend is placed before the hull-point labels (rather than after, as
+    # previously) so its bounding box can be fed to `_place_labels_no_overlap`
+    # as a region to avoid -- otherwise a label can land right behind it.
+    # Pinned to the lower-right corner (rather than `loc="best"`), which is
+    # reliably empty for this plot's data (compositions never go below the
+    # x-axis near the pure-element endpoints), so it can't drift into a hull
+    # label the way "best" did.
+    legend = None
+    if df_hull_dft is not None:
+        legend = ax.legend(
+            handles=[
+                Line2D([0], [0], color=_HULL_COLOR, marker="o", linestyle="dotted", label="ACE"),
+                Line2D(
+                    [0], [0], color=dft_color, marker="s", markerfacecolor="none",
+                    linestyle="dashed", label="DFT",
+                ),
+            ],
+            frameon=False, fontsize=_LEGEND_FONTSIZE, loc="lower right",
+        )
+
     if label_col:
         label_entries = [
             {
@@ -875,22 +912,15 @@ def plot_convex_hull_matplotlib(
                 }
                 for _, row in df_hull_dft.iterrows()
             ]
-        _place_labels_no_overlap(fig, ax, label_entries)
+        avoid_bboxes = None
+        if legend is not None:
+            fig.canvas.draw()
+            avoid_bboxes = [legend.get_window_extent(fig.canvas.get_renderer())]
+        _place_labels_no_overlap(fig, ax, label_entries, avoid_bboxes=avoid_bboxes)
 
-    if df_hull_dft is not None:
-        ax.legend(
-            handles=[
-                Line2D([0], [0], color=_HULL_COLOR, marker="o", linestyle="dotted", label="Convex hull"),
-                Line2D(
-                    [0], [0], color=dft_color, marker="s", markerfacecolor="none",
-                    linestyle="dashed", label="Materials Project (DFT)",
-                ),
-            ],
-            frameon=False, fontsize="small", loc="best",
-        )
-
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
+    ax.set_xlabel(xlabel, fontsize=_AXIS_LABEL_FONTSIZE)
+    ax.set_ylabel(ylabel, fontsize=_AXIS_LABEL_FONTSIZE)
+    ax.tick_params(axis="both", labelsize=_TICK_LABEL_FONTSIZE)
     if yrange:
         ax.set_ylim(*yrange)
     ax.spines["top"].set_visible(False)

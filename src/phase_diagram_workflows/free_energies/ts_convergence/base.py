@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 
 def ts_overlap_criterion(
     forward_energy_diff: Sequence[float],
@@ -56,6 +58,65 @@ def check_ts_overlap(
         True if the forward/backward paths overlap within tolerance.
     """
     return bool(ts_overlap_criterion(forward_energy_diff, backward_energy_diff) <= tolerance)
+
+
+def discover_tolerance(
+    criteria: Sequence[float],
+    min_gap_ratio: float = 3.0,
+    noise_floor: float = 2e-4,
+) -> float:
+    """Find the convergence tolerance in a set of criteria, from the gap between good and bad ones.
+
+    Brackets that stay within the stable range of the crystal give a criterion at the noise level, and
+    brackets that reach into a transformation or melting of the crystal give one that is much larger, with
+    little in between. Given the criteria of many brackets (say the first bracket of every concentration of
+    one phase, or every bracket of a sweep), this puts the tolerance in the middle of the widest gap
+    between two neighbouring values, in log space, i.e. at the geometric mean of the two values.
+
+    The gap has to be clear: if the widest one is narrower than `min_gap_ratio` (upper value / lower
+    value), the criteria do not fall into a low and a high group and there is nothing to discover, which
+    is reported instead of guessed. This also happens when all brackets are good or all are bad, so look at the
+    criteria (e.g. with ``plot_criteria_vs_concentration``) before relying on the result.
+
+    Values below `noise_floor` are treated as equal to it: a criterion of 1e-5 and one of 1e-4 are both zero
+    for practical purposes, and a "gap" between them would only mean that some structures happened to land
+    closer to zero than others.
+
+    Parameters
+    ----------
+    criteria : Sequence[float]
+        Values of `ts_overlap_criterion`, at least four; NaN and None (brackets without a result) are
+        ignored.
+    min_gap_ratio : float, optional
+        Smallest ratio between the two values around the widest gap for it to count as a gap (default 3).
+    noise_floor : float, optional
+        Criteria below this are indistinguishable from zero, in the units of the criterion (default 2e-4 eV/atom).
+
+    Returns
+    -------
+    float
+        The tolerance: criteria below it count as converged, criteria above it do not.
+
+    Raises
+    ------
+    ValueError
+        If there are fewer than four criteria, or no gap of at least `min_gap_ratio`.
+    """
+    values = np.array([c for c in criteria if c is not None], dtype=float)
+    values = np.sort(values[np.isfinite(values)])
+    if len(values) < 4:
+        raise ValueError(f"Need at least 4 criteria to look for a gap, got {len(values)}.")
+
+    values = np.maximum(values, noise_floor)
+    ratios = values[1:] / values[:-1]
+    widest = int(np.argmax(ratios))
+    if ratios[widest] < min_gap_ratio:
+        raise ValueError(
+            f"No clear gap in the criteria: the widest one is a factor {ratios[widest]:.2f} "
+            f"(between {values[widest]:.2g} and {values[widest + 1]:.2g}), below min_gap_ratio={min_gap_ratio}. "
+            f"Range {values[0]:.2g} to {values[-1]:.2g}."
+        )
+    return float(np.sqrt(values[widest] * values[widest + 1]))
 
 
 def scale_steps_to_bracket_width(
