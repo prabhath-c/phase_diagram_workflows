@@ -8,3 +8,6 @@ dist/
 build/
 .venv/
 executorlib_cache*/
+
+# results written by the notebooks in notebooks/ts_convergence/
+notebooks/ts_convergence/results/
