@@ -154,21 +154,25 @@ def generate_antisite_structures(
         seed=None):
     """
     Random antisite structures at target concentrations of `mixing_element`, built with
-    `create_substitution_batch`.
+    `create_substitution_batch`, each one on top of the previous one.
 
-    Each target concentration is reached from `base_structure` by randomly substituting
-    atoms on either side of it: `main_element` -> `mixing_element` when the target is above the
-    base structure's concentration, `mixing_element` -> `main_element` when it is below. So the
-    base structure may already contain both elements (an intermetallic such as Mg17Al12 can be
-    swept across its stoichiometric composition, to the Al-rich and the Mg-rich side). A target
-    that equals the base composition returns the base structure unchanged.
+    The targets on either side of the base structure's concentration form a chain that starts at
+    the base structure and moves outwards: the target closest to the base is made from the base
+    structure, the next one from that structure, and so on. Every step randomly substitutes just the
+    atoms that are missing: `main_element` -> `mixing_element` on the side above the base
+    concentration, `mixing_element` -> `main_element` on the side below it. A structure therefore
+    contains all antisites of the structures between it and the base, plus new ones, and
+    neighbouring concentrations differ only by those. The base structure may already contain both
+    elements (an intermetallic such as Mg17Al12 can be swept across its stoichiometric composition
+    to the Al-rich and the Mg-rich side); a target that equals the base composition returns the
+    base structure unchanged.
 
-    Every target starts from the unmodified base structure and is drawn with the seed
-    ``seed + n``, where ``n = round(c * N)`` is its number of `mixing_element` atoms. A structure
-    therefore depends only on the base structure, `seed` and its own composition: adding,
-    removing or reordering other concentrations never changes it (unlike one random stream
-    shared by all targets), and any row can be reproduced by itself. ``seed=None`` draws a random
-    seed; the seed that was used is recorded in the ``seed`` column.
+    The chain is defined by the set of targets, not by the order they are given in: the rows come
+    back in the order of `concentrations`. A step to target concentration ``c`` is drawn with the
+    seed ``seed + n``, where ``n = round(c * N)`` is its number of `mixing_element` atoms. A
+    structure thus depends on the base structure, `seed` and the targets between the base and
+    itself; adding a target changes the structures beyond it, not those before it. ``seed=None``
+    draws a random seed; the seed that was used is recorded in the ``seed`` column.
 
     Parameters
     ----------
@@ -211,41 +215,45 @@ def generate_antisite_structures(
 
     n_sites = len(base_structure)
     base_symbols = np.array(base_structure.get_chemical_symbols(), dtype=object)
-    n_main = int(np.count_nonzero(base_symbols == main_element))
     n_mixing = int(np.count_nonzero(base_symbols == mixing_element))
+
+    n_targets = [int(round(target_conc * n_sites)) for target_conc in concentrations]
+    for target_conc, n_target in zip(concentrations, n_targets):
+        if not 0 <= n_target <= n_sites:
+            raise ValueError(f"Cannot reach concentration {target_conc}: outside 0 to 1.")
 
     container = StructureContainer()
     container.add_pristine(base_structure.copy())
 
-    rows = []
-    for target_conc in concentrations:
-        n_target_mixing = int(round(target_conc * n_sites))
-        delta_n = n_target_mixing - n_mixing
-        if not 0 <= n_target_mixing <= n_sites:
-            raise ValueError(f"Cannot reach concentration {target_conc}: outside 0 to 1.")
-
-        structure_seed = seed + n_target_mixing
-        if delta_n == 0:
-            atoms = base_structure.copy()
-            approx = ['stoichiometric']
-        else:
-            from_element, to_element, available = (
-                (main_element, mixing_element, n_main) if delta_n > 0 else (mixing_element, main_element, n_mixing)
-            )
-            if abs(delta_n) > available:
+    atoms_by_n_mixing = {n_mixing: base_structure.copy()}
+    for on_upper_side in (True, False):
+        side_targets = sorted(
+            {n for n in n_targets if (n > n_mixing) == on_upper_side and n != n_mixing},
+            key=lambda n: abs(n - n_mixing),
+        )
+        from_element, to_element = (main_element, mixing_element) if on_upper_side else (mixing_element, main_element)
+        parent_index, parent_n = 0, n_mixing
+        for n_target in side_targets:
+            parent_symbols = np.array(container.get_structure(parent_index)["structure"].get_chemical_symbols(), dtype=object)
+            if abs(n_target - parent_n) > np.count_nonzero(parent_symbols == from_element):
+                target_conc = next(c for c, n in zip(concentrations, n_targets) if n == n_target)
                 raise ValueError(f"Cannot reach concentration {target_conc}: not enough {from_element} to replace.")
             container = create_substitution_batch(
                 container,
-                target_indices=[0],
+                target_indices=[parent_index],
                 to_element=to_element,
                 from_element=from_element,
-                n=abs(delta_n),
-                seed=structure_seed,
+                n=abs(n_target - parent_n),
+                seed=seed + n_target,
             )
-            atoms = container.get_structure(len(container) - 1)["structure"].copy()
+            parent_index, parent_n = len(container) - 1, n_target
+            atoms = container.get_structure(parent_index)["structure"].copy()
             atoms.arrays.pop(UID_KEY, None)  # container bookkeeping, not part of the structure
-            approx = ['antisites']
+            atoms_by_n_mixing[n_target] = atoms
 
+    rows = []
+    for target_conc, n_target in zip(concentrations, n_targets):
+        atoms = atoms_by_n_mixing[n_target].copy()
         symbols = np.array(atoms.get_chemical_symbols(), dtype=object)
         rows.append({
             'symbol': atoms.get_chemical_formula(),
@@ -257,7 +265,7 @@ def generate_antisite_structures(
             'atoms': atoms,
             'phase_type': phase_type,
             'reference_phase': reference_phase,
-            'approximations': approx,
+            'approximations': ['stoichiometric'] if n_target == n_mixing else ['antisites'],
             'seed': seed,
             'substituted_indices': np.flatnonzero(symbols != base_symbols).tolist(),
         })

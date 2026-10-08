@@ -252,15 +252,54 @@ class TestGenerateAntisiteStructures:
         with pytest.raises(ValueError, match="not enough Al"):
             generate_antisite_structures(base, concentrations=[1.0], seed=0)
 
-    # --- each structure depends only on base, seed and its own composition ---
+    # --- every structure is built on top of the previous one ---
 
-    def test_a_structure_does_not_depend_on_the_other_concentrations(self):
+    def test_upper_side_is_a_chain_each_structure_contains_the_previous_antisites(self):
+        base = bulk("Al", cubic=True).repeat((3, 3, 3))  # 108 atoms
+        df = generate_antisite_structures(base, concentrations=[0.05, 0.10, 0.20, 0.40], seed=11)
+        substituted = [set(indices) for indices in df["substituted_indices"]]
+        assert [len(indices) for indices in substituted] == [5, 11, 22, 43]
+        for nearer, further in zip(substituted, substituted[1:]):
+            assert nearer < further
+
+    def test_lower_side_is_a_chain_each_structure_contains_the_previous_antisites(self):
+        base = mixed_base(24)   # 24 of 32 atoms are Mg
+        df = generate_antisite_structures(base, concentrations=[0.6, 0.4, 0.2], seed=5)
+        substituted = [set(indices) for indices in df["substituted_indices"]]
+        assert [len(indices) for indices in substituted] == [5, 11, 18]
+        for nearer, further in zip(substituted, substituted[1:]):
+            assert nearer < further
+
+    def test_the_two_sides_of_the_base_are_separate_chains(self):
         base = mixed_base(16)
-        alone = generate_antisite_structures(base, concentrations=[0.75], seed=7).iloc[0]
-        among_others = generate_antisite_structures(base, concentrations=[0.25, 0.5, 0.75, 0.9], seed=7).iloc[2]
-        reordered = generate_antisite_structures(base, concentrations=[0.9, 0.75, 0.25], seed=7).iloc[1]
-        assert alone["atoms"].get_chemical_symbols() == among_others["atoms"].get_chemical_symbols()
-        assert alone["atoms"].get_chemical_symbols() == reordered["atoms"].get_chemical_symbols()
+        df = generate_antisite_structures(base, concentrations=[0.25, 0.375, 0.5, 0.625, 0.75], seed=2)
+        lower, upper = [set(df.iloc[i]["substituted_indices"]) for i in (0, 4)]
+        assert set(df.iloc[1]["substituted_indices"]) < lower
+        assert set(df.iloc[3]["substituted_indices"]) < upper
+        assert df.iloc[2]["substituted_indices"] == []
+
+    def test_the_chain_does_not_depend_on_the_order_of_the_concentrations(self):
+        base = mixed_base(16)
+        ascending = generate_antisite_structures(base, concentrations=[0.25, 0.5, 0.75, 0.9], seed=7)
+        shuffled = generate_antisite_structures(base, concentrations=[0.9, 0.25, 0.75, 0.5], seed=7)
+        for c in (0.25, 0.5, 0.75, 0.9):
+            first = ascending[ascending["c_in"] == c].iloc[0]["atoms"]
+            second = shuffled[shuffled["c_in"] == c].iloc[0]["atoms"]
+            assert first.get_chemical_symbols() == second.get_chemical_symbols()
+
+    def test_targets_beyond_a_structure_do_not_change_it(self):
+        base = mixed_base(16)
+        short = generate_antisite_structures(base, concentrations=[0.6, 0.7], seed=7)
+        longer = generate_antisite_structures(base, concentrations=[0.6, 0.7, 0.9], seed=7)
+        for i in (0, 1):
+            assert short.iloc[i]["atoms"].get_chemical_symbols() == longer.iloc[i]["atoms"].get_chemical_symbols()
+
+    def test_an_inserted_target_changes_the_structures_beyond_it(self):
+        base = bulk("Al", cubic=True).repeat((3, 3, 3))
+        without = generate_antisite_structures(base, concentrations=[0.1, 0.3], seed=1).iloc[1]
+        with_middle = generate_antisite_structures(base, concentrations=[0.1, 0.2, 0.3], seed=1).iloc[2]
+        assert without["c"] == with_middle["c"]
+        assert without["atoms"].get_chemical_symbols() != with_middle["atoms"].get_chemical_symbols()
 
     def test_recorded_seed_reproduces_an_unseeded_run(self):
         base = mixed_base(16)
