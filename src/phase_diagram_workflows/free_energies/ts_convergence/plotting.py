@@ -1,4 +1,4 @@
-"""Plots for a temperature-scaling bracket sweep of one structure.
+"""Plots for a temperature-scaling bracket sweep: one structure, or one criterion per concentration.
 
 Needs matplotlib (the ``plotting`` extra); it is imported inside the function, so importing this
 module does not require it.
@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 
 from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
 from phase_diagram_workflows.free_energies.ts_convergence.base import ts_overlap_criterion
@@ -79,3 +80,48 @@ def plot_forward_backward(
     axes[0][0].set_ylabel("Energy difference [eV/atom]")
     fig.tight_layout()
     return fig, axes
+
+
+def plot_criteria_vs_concentration(
+    history: pd.DataFrame,
+    tolerance: Optional[float] = None,
+    figsize: Tuple[float, float] = (7.0, 4.0),
+) -> Tuple[Any, Any]:
+    """Convergence criterion of every finished bracket against concentration, one curve per ``t_high``.
+
+    Where a curve jumps from the noise level to a much larger value, the bracket reaches into a
+    transformation of the crystal at that concentration; a lower ``t_high`` moves the jump to higher
+    concentration (or removes it). The vertical axis is logarithmic.
+
+    Parameters
+    ----------
+    history : pandas.DataFrame
+        One row per finished bracket, with the columns ``c`` (concentration), ``t_high`` and
+        ``criterion``, e.g. the ``bracket_log.csv`` of every structure stacked, each with its
+        concentration added. Rows without a criterion (brackets not finished) are ignored.
+    tolerance : Optional[float], optional
+        Drawn as a dashed red line, e.g. from ``discover_tolerance``.
+    figsize : Tuple[float, float], optional
+
+    Returns
+    -------
+    Tuple[Figure, Axes]
+    """
+    import matplotlib.pyplot as plt
+
+    finished = history.dropna(subset=["criterion"])
+    if finished.empty:
+        raise ValueError("No finished brackets in the history.")
+
+    fig, ax = plt.subplots(figsize=figsize)
+    for t_high, group in sorted(finished.groupby("t_high"), reverse=True):
+        group = group.sort_values("c")
+        ax.plot(group["c"], np.maximum(group["criterion"], 1e-6), "o-", ms=4, lw=1, label=f"{t_high:.0f} K")
+    if tolerance is not None:
+        ax.axhline(tolerance, color="tab:red", ls="--", label=f"tolerance {tolerance:.2g}")
+    ax.set_yscale("log")
+    ax.set_xlabel("Mg concentration")
+    ax.set_ylabel("Criterion [eV/atom]")
+    ax.legend(title="upper bound", fontsize=8)
+    fig.tight_layout()
+    return fig, ax

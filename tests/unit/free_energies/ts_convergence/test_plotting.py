@@ -14,7 +14,7 @@ matplotlib.use("Agg")
 
 import phase_diagram_workflows.free_energies.ts_convergence.plotting as plotting_module
 import phase_diagram_workflows.free_energies.ts_convergence.single as single_module
-from phase_diagram_workflows.free_energies.ts_convergence.plotting import plot_forward_backward
+from phase_diagram_workflows.free_energies.ts_convergence.plotting import plot_criteria_vs_concentration, plot_forward_backward
 
 
 def sweep(t_low, t_high, gap):
@@ -77,3 +77,20 @@ def test_chosen_brackets_only(root):
 def test_no_brackets_is_an_error(tmp_path):
     with pytest.raises(ValueError, match="No brackets"):
         plot_forward_backward(str(tmp_path / "empty"))
+
+
+def test_criteria_vs_concentration_one_curve_per_t_high_and_the_tolerance():
+    history = pd.DataFrame({
+        "c": [0.0, 0.1, 0.2, 0.1, 0.2, 0.2],
+        "t_high": [1000.0, 1000.0, 1000.0, 900.0, 900.0, 800.0],
+        "criterion": [0.0004, 0.002, 0.04, 0.0003, 0.0004, np.nan],
+    })
+    _, ax = plot_criteria_vs_concentration(history, tolerance=0.005)
+    labels = [line.get_label() for line in ax.get_lines()]
+    assert labels == ["1000 K", "900 K", "tolerance 0.005"]   # 800 K has no finished bracket
+    assert ax.get_yscale() == "log"
+
+
+def test_criteria_vs_concentration_without_finished_brackets_is_an_error():
+    with pytest.raises(ValueError, match="No finished brackets"):
+        plot_criteria_vs_concentration(pd.DataFrame({"c": [0.1], "t_high": [1000.0], "criterion": [np.nan]}))
