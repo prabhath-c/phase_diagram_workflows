@@ -57,8 +57,8 @@ def test_one_panel_per_bracket_widest_first(root):
 
 def test_title_carries_the_criterion(root):
     _, axes = plot_forward_backward(root)
-    assert "criterion=0.0300" in axes[0][0].get_title()
-    assert "criterion=0.0000" in axes[0][1].get_title()
+    assert "criterion=3.000e-02" in axes[0][0].get_title()
+    assert "criterion=0.000e+00" in axes[0][1].get_title()
 
 
 def test_both_sweeps_are_drawn_against_temperature(root):
