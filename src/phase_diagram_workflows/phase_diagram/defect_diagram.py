@@ -108,6 +108,14 @@ def _efs(table: pd.DataFrame, x: np.ndarray) -> np.ndarray:
     return np.array([row["slope"] * x + row["intercept"] for _, row in table.iterrows()])
 
 
+def _colormap(name: str, n: Optional[int] = None):
+    """The named matplotlib colormap, resampled to `n` colours if given (``matplotlib.cm.get_cmap`` is gone from newer matplotlib)."""
+    import matplotlib
+
+    cmap = matplotlib.colormaps[name]
+    return cmap.resampled(n) if n is not None else cmap
+
+
 def _legend_handles(elements: Sequence[str], extra: Sequence[Any] = ()):
     from matplotlib.lines import Line2D
 
@@ -309,7 +317,6 @@ def plot_concentration_vs_dmu(
     (dashed: every defect, bold: the most concentrated, dotted: where the dominant E_f crosses zero, i.e. the dilute limit
     breaks down) and one figure with the dominant defect at every temperature of `envelope_temperatures`. `table` should be
     ``defect_lines(..., unique=True)``. Returns ``(grid figure, envelope figure)``."""
-    import matplotlib.cm as cm
     import matplotlib.pyplot as plt
     from matplotlib.cm import ScalarMappable
     from matplotlib.colors import Normalize
@@ -410,10 +417,10 @@ def plot_concentration_vs_dmu(
         ax2.text(_ann_x, Y_LO + 3, _dr["defect_latex"] + " " + _side, fontsize=12, color=_dr["color"],
                  ha="right" if _ls else "left", va="bottom", rotation=90)
     T_env = list(envelope_temperatures)
-    _cmap_e = cm.get_cmap("coolwarm", len(T_env))
+    _cmap_e = _colormap("coolwarm", len(T_env))
     for k, T in enumerate(T_env):
         ax2.plot(x, -Ef_dom / (BOLTZMANN_EV * T * LN10), color=_cmap_e(k / (len(T_env) - 1)), lw=1.0, alpha=0.80)
-    sm = ScalarMappable(cmap=cm.get_cmap("coolwarm"), norm=Normalize(vmin=T_env[0], vmax=T_env[-1]))
+    sm = ScalarMappable(cmap=_colormap("coolwarm"), norm=Normalize(vmin=T_env[0], vmax=T_env[-1]))
     sm.set_array([])
     cbar = fig2.colorbar(sm, ax=ax2, label="Temperature (K)", pad=0.02)
     cbar.set_label("Temperature (K)", fontsize=14)
@@ -446,7 +453,6 @@ def plot_T_vs_dmu(
     a 3x3 grid with one panel per concentration of `panel_levels` (log10 c) showing every defect and, bold with the
     accessible region, the dominant one; and one figure with the iso-concentration lines of the dominant defect for
     `iso_levels`. `table` should be ``defect_lines(..., unique=True)``. Returns ``(grid figure, iso figure)``."""
-    import matplotlib.cm as cm
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
 
@@ -514,7 +520,7 @@ def plot_T_vs_dmu(
     fig.tight_layout(rect=[0, 0.08, 1, 1.0])
     _save(fig, save_grid, dpi)
 
-    cmap_cl = cm.get_cmap("plasma_r", len(iso_levels))
+    cmap_cl = _colormap("plasma_r", len(iso_levels))
     fig2, ax = plt.subplots(figsize=(11, 7))
     for k, L in enumerate(iso_levels):
         T_iso = -Ef_dom / (BOLTZMANN_EV * L * LN10)
@@ -569,7 +575,6 @@ def plot_concentration_vs_composition(
     from the defect concentrations themselves (``x = x0 + sum(c_defect * dx_defect)``) as ``dmu`` is swept; one panel per
     temperature, `x0` is the composition of the pristine phase. `table` should be ``defect_lines(..., unique=True)``.
     Returns the figure."""
-    import matplotlib.cm as cm
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
 
@@ -653,7 +658,6 @@ def plot_concentration_vs_composition_pdm(
     """As ``plot_concentration_vs_composition`` but with the composition ``x`` as the independent variable (the point-defect
     model): at each temperature ``dmu`` is found self-consistently by inverting ``x(dmu)``, on a range symmetric around
     `x0`. Returns ``(log10 figure, linear-concentration figure)``."""
-    import matplotlib.cm as cm
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
     from matplotlib.ticker import MaxNLocator
