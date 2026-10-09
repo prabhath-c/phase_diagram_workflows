@@ -186,3 +186,42 @@ class TestValidateSublatticeCoverage:
     def test_raises_on_excess(self):
         with pytest.raises(ValueError, match="excess"):
             validate_sublattice_coverage([{"label": "a", "multiplicity": 5}], 4)
+
+
+class TestDiscoverSupercellSublattices:
+    def test_fcc_matches_manual_discover_tile_chain(self):
+        from ase.build import bulk
+
+        from phase_diagram_workflows.structures.point_defects import discover_supercell_sublattices
+
+        unit_cell = bulk("Al", cubic=True)
+        result = discover_supercell_sublattices(unit_cell, (3, 3, 3))
+        assert len(result["supercell"]) == 108
+        (orbit,) = result["atomic"]
+        assert orbit["multiplicity"] == 108 and orbit["unitcell_multiplicity"] == 4
+        assert orbit["label"] == "Al_4a"
+        assert len(result["interstitial"]) > 0
+        assert all(o["multiplicity"] == 27 * o["unitcell_multiplicity"] for o in result["interstitial"])
+
+    def test_uses_given_supercell_lattice_for_interstitials(self):
+        import numpy as np
+        from ase.build import bulk
+
+        from phase_diagram_workflows.structures.point_defects import discover_supercell_sublattices
+
+        unit_cell = bulk("Al", cubic=True)
+        stretched = unit_cell.repeat((2, 2, 2))
+        stretched.set_cell(stretched.get_cell() * 1.1, scale_atoms=True)
+        plain = discover_supercell_sublattices(unit_cell, (2, 2, 2))["interstitial"][0]["cart_positions"]
+        wide = discover_supercell_sublattices(unit_cell, (2, 2, 2), supercell=stretched)["interstitial"][0]["cart_positions"]
+        assert np.allclose(wide, plain * 1.1)
+
+    def test_wrong_supercell_size_raises(self):
+        import pytest
+        from ase.build import bulk
+
+        from phase_diagram_workflows.structures.point_defects import discover_supercell_sublattices
+
+        unit_cell = bulk("Al", cubic=True)
+        with pytest.raises(ValueError, match="atoms"):
+            discover_supercell_sublattices(unit_cell, (2, 2, 2), supercell=unit_cell.repeat((3, 3, 3)))

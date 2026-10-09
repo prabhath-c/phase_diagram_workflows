@@ -69,6 +69,7 @@ from .random_antisites import generate_random_binary_structures, get_element_fra
 from .sites import (
     discover_atomic_sublattices,
     discover_interstitial_sublattices,
+    discover_supercell_sublattices,
     get_delaunay_interstitial_sites,
     get_voronoi_interstitial_sites,
     tile_atomic_sublattices,
@@ -121,6 +122,7 @@ __all__ = [
     "delta_n_for_vacancy",
     "discover_atomic_sublattices",
     "discover_interstitial_sublattices",
+    "discover_supercell_sublattices",
     "get_delaunay_interstitial_sites",
     "get_voronoi_interstitial_sites",
     "tile_atomic_sublattices",
