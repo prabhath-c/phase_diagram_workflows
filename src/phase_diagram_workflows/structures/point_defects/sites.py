@@ -587,3 +587,63 @@ def validate_sublattice_coverage(atomic_sublattices: List[dict], n_atoms: int) -
             f"but the structure has {n_atoms} atoms ({'excess' if diff > 0 else 'shortfall'} of "
             f"{abs(diff)}). Sublattices found: {detail}"
         )
+
+
+def discover_supercell_sublattices(
+    unit_cell: Atoms,
+    repeat: tuple,
+    supercell: Optional[Atoms] = None,
+    symprec: float = 1e-3,
+    r_min: float = 0.8,
+    cluster_tol: float = 0.5,
+) -> dict:
+    """
+    Symmetry-unique atomic and interstitial sublattices of a supercell, found on its unit cell.
+
+    Discovers the orbits on the small `unit_cell` (cheap, and the fractional positions do not
+    depend on the cell size), tiles them onto the supercell with `tile_atomic_sublattices` and
+    `tile_interstitial_sublattices`, and checks with `validate_sublattice_coverage` that the atomic
+    orbits cover every atom of the supercell exactly once.
+
+    Parameters
+    ----------
+    unit_cell : Atoms
+        The structure to discover on, e.g. the relaxed unit cell of a phase.
+    repeat : tuple of int
+        `(nx, ny, nz)`; the supercell is `unit_cell.repeat(repeat)`.
+    supercell : Atoms, optional
+        The supercell to place the sublattices on, if it is not simply `unit_cell.repeat(repeat)`
+        (e.g. it was relaxed on its own). Its atom order must be that of `Atoms.repeat`.
+        Default: `unit_cell.repeat(repeat)`.
+    symprec, r_min, cluster_tol : float
+        As in `discover_atomic_sublattices` and `discover_interstitial_sublattices`.
+
+    Returns
+    -------
+    dict with keys `supercell` (Atoms), `atomic` and `interstitial` (lists of dicts as returned by the
+    tiling functions; every orbit has `multiplicity` in the supercell and `unitcell_multiplicity`).
+
+    Raises
+    ------
+    ValueError
+        If `supercell` does not have `len(unit_cell) * nx * ny * nz` atoms, or the atomic orbits do not
+        cover it.
+    """
+    repeat = tuple(int(n) for n in repeat)
+    if supercell is None:
+        supercell = unit_cell.repeat(repeat)
+    expected = len(unit_cell) * repeat[0] * repeat[1] * repeat[2]
+    if len(supercell) != expected:
+        raise ValueError(f"supercell has {len(supercell)} atoms but unit_cell.repeat({repeat}) has {expected}.")
+
+    atomic = tile_atomic_sublattices(
+        discover_atomic_sublattices(unit_cell, symprec=symprec), repeat, n_unitcell_atoms=len(unit_cell)
+    )
+    interstitial = tile_interstitial_sublattices(
+        discover_interstitial_sublattices(unit_cell, r_min=r_min, cluster_tol=cluster_tol, symprec=symprec),
+        repeat,
+        unitcell_cell=unit_cell.get_cell()[:],
+        supercell_cell=supercell.get_cell()[:],
+    )
+    validate_sublattice_coverage(atomic, len(supercell))
+    return {"supercell": supercell, "atomic": atomic, "interstitial": interstitial}
