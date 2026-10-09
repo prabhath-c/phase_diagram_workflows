@@ -28,17 +28,10 @@ import numpy as np
 import pandas as pd
 from ase import Atoms
 
-from phase_diagram_workflows.defect_energies.defect_spec import defect_from_orbit
+from phase_diagram_workflows.defect_energies.defect_spec import build_defect, defect_from_orbit
 from phase_diagram_workflows.defect_energies.jobs import follow_jobs, job_tracking, load_job_status, mark_submitted
 from phase_diagram_workflows.structures.point_defects import (
-    add_pristine,
     compute_formation_energy,
-    create_interstitial,
-    create_substitution,
-    create_vacancy,
-    delta_n_for_interstitial,
-    delta_n_for_substitution,
-    delta_n_for_vacancy,
     tile_atomic_sublattices,
     tile_interstitial_sublattices,
 )
@@ -73,29 +66,6 @@ def _min_width(cell: np.ndarray) -> float:
     """Smallest perpendicular width of the cell, the distance between its opposite faces (Angstrom)."""
     volume = abs(np.linalg.det(cell))
     return float(min(volume / np.linalg.norm(np.cross(cell[(i + 1) % 3], cell[(i + 2) % 3])) for i in range(3)))
-
-
-def _build_defect(supercell: Atoms, unit_cell: Atoms, defect: Dict[str, Any]) -> Tuple[Atoms, Dict[str, int]]:
-    """The supercell with the defect, and the change in atom counts it makes (``delta_n``)."""
-    kind = defect.get("type")
-    if kind not in DEFECT_TYPES:
-        raise ValueError(f"defect['type'] must be one of {DEFECT_TYPES}, got {kind!r}.")
-    container = add_pristine(atoms=supercell, unique_id="pristine")
-
-    if kind == "interstitial":
-        element = defect["element"]
-        container = create_interstitial(container, sublattice=[defect["position"]], element=element, site_ids=[0])
-        delta_n = delta_n_for_interstitial(element)
-    else:
-        index = int(defect["atom_index"])
-        host_element = unit_cell[index].symbol   # the atom of the first tile, which has the unit cell's index
-        if kind == "vacancy":
-            container = create_vacancy(container, atom_ids=[index])
-            delta_n = delta_n_for_vacancy(host_element)
-        else:
-            container = create_substitution(container, to_element=defect["to_element"], atom_ids=[index])
-            delta_n = delta_n_for_substitution(host_element, defect["to_element"])
-    return container.get_defect_structures()[0]["structure"], delta_n
 
 
 def _check_tiling(unit_cell: Atoms, orbit: Dict[str, Any], defect: Dict[str, Any], sizes: Sequence[Tuple[int, int, int]]) -> None:
@@ -137,7 +107,7 @@ def _formation_energy_at_size(
     with job_tracking(folder):   # started.json now, error.txt if this raises
         supercell = unit_cell.repeat(repeat)
         pristine = calc_static_with_lammpslib(structure=supercell, potential_dataframe=potential_df, cores=cores)
-        defect_atoms, delta_n = _build_defect(supercell, unit_cell, defect)
+        defect_atoms, delta_n = build_defect(supercell, unit_cell, defect)
         relaxed = optimize_positions_with_lammpslib(
             structure=defect_atoms, potential_dataframe=potential_df, ftol=ftol, cores=cores
         )

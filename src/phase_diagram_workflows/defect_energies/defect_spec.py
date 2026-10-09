@@ -6,7 +6,19 @@ All members of an orbit are equivalent by symmetry, so the first one represents 
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
+
+from ase import Atoms
+
+from phase_diagram_workflows.structures.point_defects import (
+    add_pristine,
+    create_interstitial,
+    create_substitution,
+    create_vacancy,
+    delta_n_for_interstitial,
+    delta_n_for_substitution,
+    delta_n_for_vacancy,
+)
 
 KINDS = ("vacancy", "substitution", "interstitial")
 
@@ -63,3 +75,30 @@ def defect_from_orbit(orbit: Dict[str, Any], kind: str, element: Optional[str] =
     if element == species:
         raise ValueError(f"Substituting {species} by {element} is not a defect.")
     return {"type": "substitution", "atom_index": index, "to_element": element, "label": f"{element}_on_{species}_{site}"}
+
+
+def build_defect(supercell: Atoms, unit_cell: Atoms, defect: Dict[str, Any]) -> Tuple[Atoms, Dict[str, int]]:
+    """The supercell with the defect, and the change in atom counts it makes (``delta_n``).
+
+    `defect` is a dict of ``defect_from_orbit``; its atom index or void position is that of `unit_cell` and is placed in
+    the first tile of `supercell` (= ``unit_cell.repeat(...)``), which starts at the origin.
+    """
+    kind = defect.get("type")
+    if kind not in KINDS:
+        raise ValueError(f"defect['type'] must be one of {KINDS}, got {kind!r}.")
+    container = add_pristine(atoms=supercell, unique_id="pristine")
+
+    if kind == "interstitial":
+        element = defect["element"]
+        container = create_interstitial(container, sublattice=[defect["position"]], element=element, site_ids=[0])
+        delta_n = delta_n_for_interstitial(element)
+    else:
+        index = int(defect["atom_index"])
+        host_element = unit_cell[index].symbol   # the atom of the first tile, which has the unit cell's index
+        if kind == "vacancy":
+            container = create_vacancy(container, atom_ids=[index])
+            delta_n = delta_n_for_vacancy(host_element)
+        else:
+            container = create_substitution(container, to_element=defect["to_element"], atom_ids=[index])
+            delta_n = delta_n_for_substitution(host_element, defect["to_element"])
+    return container.get_defect_structures()[0]["structure"], delta_n

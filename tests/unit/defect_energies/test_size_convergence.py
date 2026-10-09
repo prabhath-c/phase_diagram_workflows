@@ -10,10 +10,10 @@ from ase.build import bulk
 
 from phase_diagram_workflows.defect_energies import size_convergence
 from phase_diagram_workflows.structures.point_defects import discover_atomic_sublattices, discover_interstitial_sublattices
+from phase_diagram_workflows.defect_energies.defect_spec import build_defect
 from phase_diagram_workflows.utils.executor_spec import ExecutorSpec
 from phase_diagram_workflows.defect_energies.size_convergence import (
     RESULT_FILE,
-    _build_defect,
     _min_width,
     converge_formation_energy,
     cores_for_size,
@@ -38,11 +38,11 @@ class TestBuildDefect:
     unit_cell = bulk("Al", cubic=True)
 
     def test_vacancy(self):
-        atoms, delta_n = _build_defect(self.unit_cell.repeat(2), self.unit_cell, {"type": "vacancy", "atom_index": 0})
+        atoms, delta_n = build_defect(self.unit_cell.repeat(2), self.unit_cell, {"type": "vacancy", "atom_index": 0})
         assert len(atoms) == 31 and delta_n == {"Al": -1}
 
     def test_substitution(self):
-        atoms, delta_n = _build_defect(
+        atoms, delta_n = build_defect(
             self.unit_cell.repeat(2), self.unit_cell, {"type": "substitution", "atom_index": 1, "to_element": "Mg"}
         )
         assert len(atoms) == 32 and atoms.get_chemical_symbols().count("Mg") == 1
@@ -50,7 +50,7 @@ class TestBuildDefect:
 
     def test_interstitial_sits_at_the_given_position(self):
         position = [2.025, 0.0, 0.0]
-        atoms, delta_n = _build_defect(
+        atoms, delta_n = build_defect(
             self.unit_cell.repeat(2), self.unit_cell, {"type": "interstitial", "position": position, "element": "Mg"}
         )
         assert len(atoms) == 33 and delta_n == {"Mg": 1}
@@ -58,7 +58,7 @@ class TestBuildDefect:
 
     def test_unknown_type_raises(self):
         with pytest.raises(ValueError, match="type"):
-            _build_defect(self.unit_cell.repeat(2), self.unit_cell, {"type": "dislocation"})
+            build_defect(self.unit_cell.repeat(2), self.unit_cell, {"type": "dislocation"})
 
 
 class SlurmClusterExecutor:
