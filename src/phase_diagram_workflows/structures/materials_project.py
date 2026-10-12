@@ -82,6 +82,16 @@ def get_materials_project_df(
     df = pd.DataFrame(rows)
 
     if "material_id" in df.columns:
+        # `model_dump()` mis-serializes MP's `MPID` type: it produces a
+        # padded internal encoding (e.g. "mp-aaaaaafe") instead of the
+        # normal "mp-134" form `str(doc.material_id)` gives -- harmless as
+        # long as material_id is only used as an opaque, locally-unique
+        # label (e.g. for job naming), but it silently breaks matching
+        # these IDs against any other Materials Project API call, and
+        # doesn't match the IDs shown on the website or cited in papers.
+        # Overwrite with the correctly-stringified id, aligned by row order
+        # with `docs_all` (built in the same order, before any dedup).
+        df["material_id"] = [str(d.material_id) for d in docs_all]
         df = df.drop_duplicates(subset="material_id").reset_index(drop=True)
 
     return df

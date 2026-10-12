@@ -26,7 +26,9 @@ from ase.build import bulk
 from phase_diagram_workflows.phase_diagram.convex_hull import (
     _default_axis_labels,
     _default_yrange,
+    _place_labels_no_overlap,
     _structure_color,
+    _subscript_digits,
     analyze_convex_hull,
     compute_convex_hull,
     compute_energies_with_nested_executor,
@@ -54,6 +56,12 @@ HULL_DF_WITH_DIP = pd.DataFrame({
     "mixing_energy": [0.0, 0.05, -0.04, 0.02, 0.05, 0.0],
     "formula_pretty": ["Al", "S1", "MgAl2", "S2", "S3", "Mg"],
 })
+
+# HULL_DF plus a second, already-computed mixing energy (e.g. from Materials
+# Project's own energy_per_atom) with a deliberately different lower hull --
+# dips at x=0.25 instead of a plain Al-Mg edge -- so the DFT overlay tests can
+# tell the two hulls apart.
+HULL_DF_WITH_DFT = HULL_DF.assign(mixing_energy_dft=[0.0, -0.55, 0.3, 0.4, -0.05, 0.0])
 
 
 class TestOptimizeAndComputeEnergyPerAtom:
@@ -252,6 +260,116 @@ class TestStructureColor:
 
         assert _structure_color() == sns.color_palette("muted").as_hex()[0]
 
+    def test_index_selects_other_palette_slots(self):
+        import seaborn as sns
+
+        assert _structure_color(1) == sns.color_palette("muted").as_hex()[1]
+
+
+class TestSubscriptDigits:
+    def test_subscripts_multi_digit_counts(self):
+        assert _subscript_digits("Mg23Al30") == "Mg₂₃Al₃₀"
+
+    def test_subscripts_single_digit_counts(self):
+        assert _subscript_digits("MgAl2") == "MgAl₂"
+
+    def test_no_digits_unchanged(self):
+        assert _subscript_digits("MgAl") == "MgAl"
+
+
+class TestPlaceLabelsNoOverlap:
+    def teardown_method(self):
+        plt.close("all")
+
+    def test_empty_entries_returns_empty_list(self):
+        fig, ax = plt.subplots()
+        assert _place_labels_no_overlap(fig, ax, []) == []
+
+    def test_far_apart_labels_keep_default_offset_and_no_leader_line(self):
+        fig, ax = plt.subplots()
+        ax.set_xlim(0, 1)
+        ax.set_ylim(-1, 1)
+        entries = [
+            {"x": 0.1, "y": 0.0, "text": "Al", "color": "black"},
+            {"x": 0.9, "y": 0.0, "text": "Mg", "color": "black"},
+        ]
+
+        annotations = _place_labels_no_overlap(fig, ax, entries)
+
+        assert [a.get_text() for a in annotations] == ["Al", "Mg"]
+        assert all(a.arrow_patch is None for a in annotations)
+
+    def test_close_labels_use_free_space_above_and_below_with_no_leader_line(self):
+        import matplotlib.text as mtext
+
+        fig, ax = plt.subplots(figsize=(3, 3))
+        ax.set_xlim(0.3, 0.5)
+        ax.set_ylim(-0.05, 0.05)
+        entries = [
+            {"x": 0.39, "y": -0.02, "text": "Beta", "color": "black"},
+            {"x": 0.40, "y": -0.021, "text": "Epsilon", "color": "black"},
+        ]
+
+        annotations = _place_labels_no_overlap(fig, ax, entries)
+
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        text_bboxes = [mtext.Text.get_window_extent(a, renderer) for a in annotations]
+        assert not text_bboxes[0].overlaps(text_bboxes[1])
+        # Two labels, two free (no-leader-line) slots -- above and below --
+        # so both should land in one without needing to be pushed further
+        # out. This is the actual improvement over always stacking upward:
+        # using the empty space on the other side first.
+        assert all(a.arrow_patch is None for a in annotations)
+
+    def test_three_mutually_overlapping_labels_need_a_leader_line(self):
+        import matplotlib.text as mtext
+
+        fig, ax = plt.subplots(figsize=(3, 3))
+        ax.set_xlim(0.3, 0.5)
+        ax.set_ylim(-0.05, 0.05)
+        entries = [
+            {"x": 0.38, "y": -0.020, "text": "Beta", "color": "black"},
+            {"x": 0.39, "y": -0.021, "text": "Epsilon", "color": "black"},
+            {"x": 0.40, "y": -0.019, "text": "Gamma", "color": "black"},
+        ]
+
+        annotations = _place_labels_no_overlap(fig, ax, entries)
+
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        text_bboxes = [mtext.Text.get_window_extent(a, renderer) for a in annotations]
+        for i in range(len(text_bboxes)):
+            for j in range(i + 1, len(text_bboxes)):
+                assert not text_bboxes[i].overlaps(text_bboxes[j])
+        # Only two free slots (directly above, directly below) exist for
+        # three mutually-overlapping labels, so at least one must be pushed
+        # further out and picks up a leader line -- but not all three, or
+        # the free slots were never used in the first place.
+        needs_leader = [a.arrow_patch is not None for a in annotations]
+        assert any(needs_leader)
+        assert not all(needs_leader)
+
+    def test_max_rings_exhausted_falls_back_to_last_candidate(self):
+        # With max_rings=1 there are only two candidates per label (one
+        # ring's above/below pair). Three labels at the exact same point
+        # force the third to run through both candidates, find both
+        # occupied, and exit the search loop by exhaustion rather than by
+        # `break` -- the fallback path that keeps whatever the last
+        # candidate offset/annotation was.
+        fig, ax = plt.subplots(figsize=(3, 3))
+        ax.set_xlim(0.3, 0.5)
+        ax.set_ylim(-0.05, 0.05)
+        entries = [
+            {"x": 0.4, "y": 0.0, "text": "Beta", "color": "black"},
+            {"x": 0.4, "y": 0.0, "text": "Epsilon", "color": "black"},
+            {"x": 0.4, "y": 0.0, "text": "Gamma", "color": "black"},
+        ]
+
+        annotations = _place_labels_no_overlap(fig, ax, entries, max_rings=1)
+
+        assert [a.get_text() for a in annotations] == ["Beta", "Epsilon", "Gamma"]
+
 
 class TestPlotConvexHull:
     def test_returns_figure_and_hull(self):
@@ -281,6 +399,28 @@ class TestPlotConvexHull:
         assert fig.layout.xaxis.title.text == "custom x"
         assert fig.layout.yaxis.title.text == "custom y"
 
+    def test_dft_overlay_adds_a_third_trace(self):
+        fig, _ = plot_convex_hull(
+            HULL_DF_WITH_DFT, x_col="x", energy_col="mixing_energy", dft_mixing_energy_col="mixing_energy_dft",
+        )
+        assert len(fig.data) == 3
+        assert fig.data[2].name == "Convex hull (DFT)"
+
+    def test_no_dft_overlay_by_default(self):
+        fig, _ = plot_convex_hull(HULL_DF, x_col="x", energy_col="mixing_energy")
+        assert len(fig.data) == 2
+
+    def test_yrange_auto_scales_to_outliers_by_default(self):
+        # Regression test: max_energy_above_hull used to default to 0.2,
+        # silently capping the y-axis even when nobody asked for a cap.
+        # With no yrange/max_energy_above_hull given, a point far above the
+        # hull must not be clipped out of the view -- yaxis.range should be
+        # left unset (None) so plotly's own autorange handles it.
+        df = HULL_DF.copy()
+        df.loc[len(df)] = [0.4, 0.5, "Outlier"]
+        fig, _ = plot_convex_hull(df, x_col="x", energy_col="mixing_energy")
+        assert fig.layout.yaxis.range is None
+
 
 class TestPlotConvexHullMatplotlib:
     def teardown_method(self):
@@ -307,6 +447,47 @@ class TestPlotConvexHullMatplotlib:
 
     def test_no_labels_when_label_col_is_none(self):
         fig, ax, _ = plot_convex_hull_matplotlib(HULL_DF, x_col="x", energy_col="mixing_energy", label_col=None)
+        assert len(ax.texts) == 0
+
+    def test_no_legend_without_dft_overlay(self):
+        _, ax, _ = plot_convex_hull_matplotlib(HULL_DF, x_col="x", energy_col="mixing_energy")
+        assert ax.get_legend() is None
+
+    def test_yrange_auto_scales_to_outliers_by_default(self):
+        # Regression test: max_energy_above_hull used to default to 0.2,
+        # silently capping the y-axis even when nobody asked for a cap.
+        # With no yrange/max_energy_above_hull given, a point far above the
+        # hull (0.5) must still be visible, not clipped out of the view.
+        df = HULL_DF.copy()
+        df.loc[len(df)] = [0.4, 0.5, "Outlier"]
+        _, ax, _ = plot_convex_hull_matplotlib(df, x_col="x", energy_col="mixing_energy")
+        assert ax.get_ylim()[1] > 0.3
+
+    def test_dft_overlay_adds_dashed_hull_and_legend(self):
+        fig, ax, hull = plot_convex_hull_matplotlib(
+            HULL_DF_WITH_DFT, x_col="x", energy_col="mixing_energy", dft_mixing_energy_col="mixing_energy_dft",
+        )
+        # primary hull is unaffected by the overlay
+        assert sorted(hull["formula_pretty"]) == ["Al", "Mg"]
+        assert ax.get_legend() is not None
+        assert "--" in [line.get_linestyle() for line in ax.get_lines()]
+
+    def test_dft_overlay_hull_vertices_are_labeled_too(self):
+        _, ax, _ = plot_convex_hull_matplotlib(
+            HULL_DF_WITH_DFT, x_col="x", energy_col="mixing_energy", dft_mixing_energy_col="mixing_energy_dft",
+        )
+        texts = {t.get_text() for t in ax.texts}
+        # the DFT hull's own dip vertex (x=0.25) is on its hull but not the
+        # primary one, so seeing it labeled confirms the overlay's labels
+        # were actually drawn, not just its line/markers. Formula digits are
+        # rendered as subscripts (see TestSubscriptDigits).
+        assert _subscript_digits("Al3Mg") in texts
+
+    def test_dft_overlay_omitted_when_label_col_is_none(self):
+        _, ax, _ = plot_convex_hull_matplotlib(
+            HULL_DF_WITH_DFT, x_col="x", energy_col="mixing_energy",
+            dft_mixing_energy_col="mixing_energy_dft", label_col=None,
+        )
         assert len(ax.texts) == 0
 
 
@@ -382,6 +563,35 @@ class TestAnalyzeConvexHull:
             "energy_per_atom_calc": [-3.0, -2.9, -2.7, -1.8, -1.5],
             "formula_pretty": ["Al", "S1", "S2", "S3", "Mg"],
         })
+
+    @staticmethod
+    def _energy_df_with_dft():
+        return TestAnalyzeConvexHull._energy_df().assign(
+            energy_per_atom=[-3.0, -2.95, -2.0, -1.9, -1.5],
+        )
+
+    def test_dft_energy_col_adds_overlay_matplotlib(self):
+        fig, ax, hull = analyze_convex_hull(
+            self._energy_df_with_dft(), backend="matplotlib", dft_energy_col="energy_per_atom",
+        )
+        assert ax.get_legend() is not None
+        assert not hull.empty
+
+    def test_dft_energy_col_adds_overlay_plotly(self):
+        fig, hull = analyze_convex_hull(
+            self._energy_df_with_dft(), backend="plotly", dft_energy_col="energy_per_atom",
+        )
+        assert len(fig.data) == 3
+
+    def test_dft_energy_col_none_keeps_two_traces(self):
+        fig, _ = analyze_convex_hull(self._energy_df(), backend="plotly")
+        assert len(fig.data) == 2
+
+    def test_dft_energy_col_does_not_mutate_input(self):
+        df = self._energy_df_with_dft()
+        analyze_convex_hull(df, backend="plotly", dft_energy_col="energy_per_atom")
+        assert "mixing_energy_dft" not in df.columns
+        assert "mixing_energy" not in df.columns
 
     def test_plotly_backend(self):
         fig, hull = analyze_convex_hull(self._energy_df(), backend="plotly")
