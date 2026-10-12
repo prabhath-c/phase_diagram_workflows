@@ -75,7 +75,7 @@ def plot_forward_backward(
         # reversible scaling: lambda = t_low / T, from 1 at t_low down to t_low / t_high
         ax.plot(t_low / np.asarray(result["forward_lambda"][0]), forward, label="forward")
         ax.plot(t_low / np.asarray(result["backward_lambda"][0]), backward, label="backward")
-        ax.set_title(f"{t_low:.0f}-{t_high:.0f} K, criterion={ts_overlap_criterion(forward, backward):.4f}")
+        ax.set_title(f"{t_low:.0f}-{t_high:.0f} K, criterion={ts_overlap_criterion(forward, backward):.3e}")
         ax.legend()
     axes[0][0].set_ylabel("Energy difference [eV/atom]")
     fig.tight_layout()
