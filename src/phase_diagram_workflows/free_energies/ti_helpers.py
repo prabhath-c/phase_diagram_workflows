@@ -63,9 +63,9 @@ def _validate_calphy_parameters(calphy_parameters: Dict[str, Any]) -> None:
         raise ValueError(f"calphy_parameters missing required keys: {missing_keys}")
     
     # Validate mode and reference_phase values
-    valid_modes = {'fe', 'ts'}
+    valid_modes = {'fe', 'ts', 'composition_scaling'}
     if calphy_parameters['mode'] not in valid_modes:
-        raise ValueError(f"mode must be 'fe' or 'ts', got '{calphy_parameters['mode']}'")
+        raise ValueError(f"mode must be one of {sorted(valid_modes)}, got '{calphy_parameters['mode']}'")
     
     valid_phases = {'solid', 'liquid'}
     if calphy_parameters['reference_phase'] not in valid_phases:
