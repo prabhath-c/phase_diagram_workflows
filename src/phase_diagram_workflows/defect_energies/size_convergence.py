@@ -95,20 +95,28 @@ def _formation_energy_at_size(
     pinned_element: str,
     swept_element: str,
     ftol: float,
+    relax_volume: bool,
     cores: int,
     folder: str,
 ) -> str:
-    """One size: pristine static, defect relaxation, formation energy; written to ``<folder>/result.pkl``."""
+    """One size: pristine and defect relaxation (positions only, or positions and volume), formation energy; written to ``<folder>/result.pkl``."""
     from atomistics.calculators.lammps.libcalculator import (
         calc_static_with_lammpslib,
+        optimize_positions_and_volume_with_lammpslib,
         optimize_positions_with_lammpslib,
     )
 
+    optimize = optimize_positions_and_volume_with_lammpslib if relax_volume else optimize_positions_with_lammpslib
+
     with job_tracking(folder):   # started.json now, error.txt if this raises
         supercell = unit_cell.repeat(repeat)
-        pristine = calc_static_with_lammpslib(structure=supercell, potential_dataframe=potential_df, cores=cores)
+        if relax_volume:   # the pristine supercell is relaxed like the defect one, so both energies are at the same pressure
+            supercell_relaxed = optimize(structure=supercell, potential_dataframe=potential_df, ftol=ftol, cores=cores)
+            pristine = calc_static_with_lammpslib(structure=supercell_relaxed, potential_dataframe=potential_df, cores=cores)
+        else:
+            pristine = calc_static_with_lammpslib(structure=supercell, potential_dataframe=potential_df, cores=cores)
         defect_atoms, delta_n = build_defect(supercell, unit_cell, defect)
-        relaxed = optimize_positions_with_lammpslib(
+        relaxed = optimize(
             structure=defect_atoms, potential_dataframe=potential_df, ftol=ftol, cores=cores
         )
         E_defect = float(calc_static_with_lammpslib(structure=relaxed, potential_dataframe=potential_df, cores=cores)["energy"])
@@ -127,6 +135,7 @@ def _formation_energy_at_size(
             "formation": record,
             "cores": cores,
             "ftol": ftol,
+            "relax_volume": relax_volume,
             "defect_structure": relaxed,
         }
         os.makedirs(folder, exist_ok=True)
@@ -149,6 +158,7 @@ def converge_formation_energy(
     working_directory: str,
     element: Optional[str] = None,
     ftol: float = 1e-8,
+    relax_volume: bool = False,
     atoms_per_core: int = 350,
     max_cores: int = 16,
     executor_spec: Optional[ExecutorSpec] = None,
@@ -186,6 +196,9 @@ def converge_formation_energy(
     ftol : float, optional
         Force tolerance of the defect relaxation (eV/Angstrom). Default 1e-8: the library default of 1e-4 let
         the minimiser stop on the shoulder of an interstitial's energy landscape in the earlier size studies.
+    relax_volume : bool, optional
+        Relax the cell volume as well as the positions, for the pristine supercell and the defect one alike. Default
+        False: the defect relaxes positions only at the fixed cell, and the pristine supercell is a static calculation.
     atoms_per_core, max_cores : int, optional
         Parameters of ``cores_for_size``.
     executor_spec : ExecutorSpec, optional
@@ -228,7 +241,7 @@ def converge_formation_energy(
     for _, folder, _ in jobs:
         mark_submitted(folder)
     arguments = (unit_cell, defect)
-    fixed = (potential_df, mu0, pinned_element, swept_element, ftol)
+    fixed = (potential_df, mu0, pinned_element, swept_element, ftol, relax_volume)
     if executor_spec is None:
         for repeat, folder, _ in jobs:
             _formation_energy_at_size(*arguments, repeat, *fixed, 1, folder)

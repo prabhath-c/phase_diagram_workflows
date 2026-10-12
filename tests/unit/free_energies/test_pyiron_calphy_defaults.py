@@ -32,8 +32,9 @@ def test_every_call_is_an_independent_deep_copy():
     assert "temperature" not in second
 
 
-def test_accepted_by_calphy():
+def test_accepted_by_calphy(tmp_path, monkeypatch):
     calphy = pytest.importorskip("calphy")
+    monkeypatch.chdir(tmp_path)   # with no lattice, calphy builds a default Al structure and writes ts-fcc-solid-300-0.0.data into the working directory
     parameters = pyiron_atomistics_calphy_parameters()
     parameters.update(mode="ts", temperature=[300, 320], reference_phase="solid")
     calculation = calphy.Calculation.model_validate(
