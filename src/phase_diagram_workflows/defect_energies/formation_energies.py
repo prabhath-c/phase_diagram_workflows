@@ -2,7 +2,7 @@
 Formation energies of every point defect of one type of a phase, at one supercell size.
 
 ``calculate_formation_energies`` builds one defect per symmetry-unique site (orbit) on the supercell that the size
-convergence found, relaxes all of them, positions only at the fixed cell of the pristine host, in one batch (SLURM or
+convergence found, relaxes all of them, positions only at the fixed cell of the pristine host unless `relax_volume` is set, in one batch (SLURM or
 in the notebook), and returns one record per defect with its formation energy as a function of the chemical
 potential. ``save_defect_results`` stores the records, ``load_defect_results`` reads them back.
 
@@ -59,6 +59,7 @@ def calculate_formation_energies(
     working_directory: str,
     elements: Optional[Sequence[str]] = None,
     ftol: float = 1e-8,
+    relax_volume: bool = False,
     executor_spec: Optional[ExecutorSpec] = None,
     structures_in_parallel: int = 10,
     threads_per_structure: int = 2,
@@ -94,6 +95,9 @@ def calculate_formation_energies(
     ftol : float, optional
         Force tolerance of the relaxation (eV/Angstrom). Default 1e-8: the library default of 1e-4 let the minimiser stop
         early for interstitials in the size studies.
+    relax_volume : bool, optional
+        Relax the cell volume as well as the positions, for the pristine supercell and every defect alike. Default False:
+        positions only, at the fixed cell of the pristine host.
     executor_spec, structures_in_parallel, threads_per_structure, follow, follow_interval
         As in ``relax_structures``.
 
@@ -128,7 +132,7 @@ def calculate_formation_energies(
     structures = {PRISTINE: supercell, **{spec["label"]: atoms for spec, _, _, atoms, _ in defects}}
     table = relax_structures(
         structures, potential_df, working_directory,
-        relax_volume=False, ftol=ftol, executor_spec=executor_spec,
+        relax_volume=relax_volume, ftol=ftol, executor_spec=executor_spec,
         structures_in_parallel=min(structures_in_parallel, len(structures)), threads_per_structure=threads_per_structure,
         follow=follow, follow_interval=follow_interval,
     )
