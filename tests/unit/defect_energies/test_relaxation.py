@@ -92,3 +92,22 @@ class TestRelaxStructures:
         assert captured["inner_resource_dict"] == {"cores": 1, "threads_per_core": 3}
         assert captured["outer_resource_dict"] == {"queue": "q"} and captured["cache_directory"] == "c"
         assert list(table["status"]) == ["queued", "queued"]   # submitted, nothing started
+
+    def test_cores_and_oversubscribe_reach_the_task(self, tmp_path, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(relaxation, "run_nested_batch", lambda **kw: captured.update(kw))
+        for oversubscribe in (True, False):
+            relax_structures(
+                {"a": bulk("Al")}, pd.DataFrame(), str(tmp_path / str(oversubscribe)),
+                executor_spec=ExecutorSpec(object, {}), threads_per_structure=4, oversubscribe=oversubscribe,
+            )
+            assert captured["task_fn"].keywords == {"cores": 4, "oversubscribe": oversubscribe}
+
+
+class TestRelaxOne:
+    def test_cores_and_oversubscribe_reach_atomistics(self, monkeypatch):
+        import atomistics.calculators.lammps.libcalculator as libcalculator
+        calls = []
+        monkeypatch.setattr(libcalculator, "optimize_positions_and_volume_with_lammpslib", lambda **kw: calls.append(kw) or kw["structure"])
+        relaxation._relax_one(bulk("Al"), pd.DataFrame(), True, 1e-6, cores=4, oversubscribe=True)
+        assert calls[0]["cores"] == 4 and calls[0]["oversubscribe"] is True

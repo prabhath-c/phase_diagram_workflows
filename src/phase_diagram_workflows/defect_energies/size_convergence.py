@@ -203,7 +203,7 @@ def converge_formation_energy(
         Parameters of ``cores_for_size``.
     executor_spec : ExecutorSpec, optional
         e.g. ``ExecutorSpec(SlurmClusterExecutor, {"pysqa_config_directory": ..., "cache_directory": ...,
-        "resource_dict": {"queue": "cmmg", "run_time_limit": 3600}})``. With it, one job per size is submitted,
+        "resource_dict": {"queue": "cmmg", "run_time_max": 3600}})``. With it, one job per size is submitted,
         each with its own cores, and this returns once they are submitted (if the executor can run on without
         this process). ``cores`` and ``threads_per_core`` of the ``resource_dict`` are set per size. Without it
         the sizes run one after the other in this process, on one core.
