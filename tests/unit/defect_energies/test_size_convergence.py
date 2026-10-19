@@ -83,6 +83,11 @@ class TestHelpers:
         assert cores_for_size(2048) == 8 and cores_for_size(5324) == 16 and cores_for_size(10176) == 16   # powers of two, capped
         assert all(cores_for_size(n) in (1, 2, 4, 8, 16) for n in range(1, 20000, 137))
 
+    def test_serial_below_zero_gives_small_cells_ranks_too(self):
+        assert cores_for_size(318, atoms_per_core=80, serial_below=0) == 4
+        assert cores_for_size(636, atoms_per_core=80, serial_below=0) == 8
+        assert cores_for_size(636, atoms_per_core=80) == 1                       # the default rule: below 1500 atoms, one rank
+
     def test_min_width_of_orthorhombic_and_hexagonal_cells(self):
         assert _min_width(np.diag([4.0, 5.0, 6.0])) == pytest.approx(4.0)
         hexagonal = bulk("Mg").cell.array * 3
