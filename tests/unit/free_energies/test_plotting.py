@@ -63,6 +63,23 @@ class TestPlotForwardBackwardCompositionScaling:
         assert len(ax.get_lines()[0].get_xdata()) == N_STEPS - 99
         plt.close(fig)
 
+    def test_smoothing_longer_than_the_data_is_clamped(self, tmp_path):
+        fig, ax = plot_forward_backward_composition_scaling(write_job(tmp_path / "job"), smoothing=10 * N_STEPS)
+
+        forward = ax.get_lines()[0]
+        assert len(forward.get_xdata()) == len(forward.get_ydata()) >= 1     # np.convolve would have swapped its arguments
+        plt.close(fig)
+
+    def test_job_that_is_still_running_with_a_single_row_is_not_an_error(self, tmp_path):
+        folder = write_job(tmp_path / "job", with_sweeps=False, with_report=False)
+        (tmp_path / "job" / "forward_1.dat").write_text("# dU_1 dU_2 lambda\n-3.5 -3.3 1.0\n")
+        (tmp_path / "job" / "backward_1.dat").write_text("# dU_1 dU_2 lambda\n-3.5 -3.3 0.0\n")
+
+        fig, ax = plot_forward_backward_composition_scaling(folder)
+
+        assert ax.get_title() == "500 K (running)"
+        plt.close(fig)
+
     def test_draws_into_the_axes_it_is_given(self, tmp_path):
         fig, axes = plt.subplots(1, 2)
         write_job(tmp_path / "a")

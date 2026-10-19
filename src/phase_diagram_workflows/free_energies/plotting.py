@@ -69,7 +69,8 @@ def plot_forward_backward_composition_scaling(
         return fig, ax
 
     def mean(values):
-        return np.convolve(values, np.ones(smoothing) / smoothing, mode="valid") if smoothing > 1 else values
+        window = min(smoothing, len(values))    # np.convolve would swap its arguments for a window longer than the data
+        return np.convolve(values, np.ones(window) / window, mode="valid") if window > 1 else values
 
     for path, label in zip(paths, ("forward", "backward")):
         u_reference, u_target, lam = np.loadtxt(path, comments="#", unpack=True)

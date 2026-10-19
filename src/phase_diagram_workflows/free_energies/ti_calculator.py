@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from typing import Dict, Any, Tuple, Optional, List
 from pathlib import Path
 
@@ -138,15 +139,25 @@ def _target_energy_at_end_of_forward_switching(working_directory: str, n_last: i
 
     Read from ``forward_<i>.dat`` of a composition_scaling job (columns dU_1, dU_2, lambda): at lambda = 0 only the
     potential of the target composition is left, so dU_2 over the last ``n_last`` rows is its energy per atom.
-    Averaged over the iterations; NaN if the files are not there. A target that melted shows as a jump of this
-    energy against its neighbours in concentration or temperature.
+    Averaged over the iterations. A target that melted shows as a jump of this energy against its neighbours in
+    concentration or temperature. NaN, with a warning, if forward_1.dat is missing or has no data: call it for a
+    finished job only (a running job has no report.yaml yet and its files are still being written).
     """
     energies = []
     iteration = 1
     while os.path.exists(path := os.path.join(working_directory, f"forward_{iteration}.dat")):
-        energies.append(float(np.loadtxt(path, comments="#", usecols=1)[-n_last:].mean()))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")    # numpy warns that an empty file "contained no data"
+            values = np.loadtxt(path, comments="#", usecols=1, ndmin=1)
+        if values.size == 0:
+            warnings.warn(f"{path} has no data: energy_target is NaN")
+            return np.nan
+        energies.append(float(values[-n_last:].mean()))
         iteration += 1
-    return float(np.mean(energies)) if energies else np.nan
+    if not energies:
+        warnings.warn(f"no forward_1.dat in {working_directory}: energy_target is NaN")
+        return np.nan
+    return float(np.mean(energies))
 
 
 def gather_calphy_results_detailed(working_directory: str) -> pd.DataFrame:
@@ -182,9 +193,9 @@ def gather_calphy_results_detailed(working_directory: str) -> pd.DataFrame:
           zero when the switching is reversible, large when the phase melts or changes along the way
 
         Additional columns of ``composition_scaling``, all in eV/atom unless noted. A composition_scaling job gives only
-        the free energy of the transformation FROM the reference composition (``reference_composition``), not an
-        absolute free energy; the reference comes from a separate fe calculation and is added with
-        ``add_reference_free_energy``.
+        the free-energy DIFFERENCE from the reference composition (``reference_composition``), never an absolute free
+        energy: there is no ``free_energy`` column for this mode. To get one, add the free energy of the reference
+        composition (for example from an fe calculation) to ``delta_free_energy`` yourself.
 
         - reference_composition: c(Mg) of the starting structure
         - delta_free_energy: free-energy difference to the reference composition, work + mass correction, WITHOUT the
@@ -195,10 +206,9 @@ def gather_calphy_results_detailed(working_directory: str) -> pd.DataFrame:
           ``-temperature * ideal_entropy`` (it lowers the free energy), as in calphy's ``fix_composition_scaling``
         - delta_free_energy_with_ideal_entropy: delta_free_energy - temperature * ideal_entropy
         - energy_target: potential energy per atom of the target composition at the end of the forward switching
-          (average over the iterations; NaN if forward_<i>.dat is missing). A melted target shows as a jump of it
-          against its neighbours in concentration or temperature
-        - reference_free_energy, free_energy, free_energy_with_ideal_entropy: NaN here; filled by
-          ``add_reference_free_energy`` (reference + delta, without and with the ideal-mixing term)
+          (average over the iterations). A melted target shows as a jump of it against its neighbours in
+          concentration or temperature. NaN while the job is running; NaN with a warning if the job is finished but
+          forward_1.dat is missing or empty
 
     Raises
     ------
@@ -273,8 +283,8 @@ def gather_calphy_results_detailed(working_directory: str) -> pd.DataFrame:
         data["backward_lambda"] = b_lambdas if b_lambdas else None
 
     elif mode == "composition_scaling":
-        # the job gives only the free energy of the transformation from the reference composition;
-        # the free energy of the reference itself comes from a separate fe job, see add_reference_free_energy
+        # the job gives only the free-energy difference from the reference composition: no absolute free energy,
+        # so no free_energy column
         results = rep["results"] if rep else {}
         data["temperature"] = inp["temperature"]
         data["reference_composition"] = inp["reference_composition"]
@@ -282,14 +292,12 @@ def gather_calphy_results_detailed(working_directory: str) -> pd.DataFrame:
         data["work"] = results.get("work", np.nan)
         data["mass_correction"] = results.get("mass_correction", np.nan)
         data["dissipation"] = results.get("dissipation", np.nan)    # eV/atom, half the forward + backward work: ~0 when reversible
-        data["energy_target"] = _target_energy_at_end_of_forward_switching(wd)   # eV/atom of the target composition at the end of the forward switching
+        # eV/atom of the target composition at the end of the forward switching; a running job (no report yet) has none
+        data["energy_target"] = _target_energy_at_end_of_forward_switching(wd) if rep else np.nan
         # calphy's convention (calphy.postprocessing): ideal_entropy = -entropy_contribution of the report, positive, eV/atom/K;
         # the ideal-mixing term enters as F - T * ideal_entropy (calphy's fix_composition_scaling)
         data["ideal_entropy"] = -results.get("entropy_contribution", np.nan)
         data["delta_free_energy_with_ideal_entropy"] = data["delta_free_energy"] - inp["temperature"] * data["ideal_entropy"]
-        data["reference_free_energy"] = np.nan
-        data["free_energy"] = np.nan                       # reference + delta, without the ideal-entropy term
-        data["free_energy_with_ideal_entropy"] = np.nan    # free_energy - temperature * ideal_entropy
         data["free_energy_error"] = results.get("error", np.nan)
         data["forward_energy_diff"] = None
         data["backward_energy_diff"] = None
@@ -307,61 +315,6 @@ def gather_calphy_results_detailed(working_directory: str) -> pd.DataFrame:
         data["backward_lambda"] = None
 
     return pd.DataFrame([data])
-
-
-def _same_value(a: Any, b: Any) -> bool:
-    return bool(np.allclose(np.atleast_1d(a).astype(float), np.atleast_1d(b).astype(float)))
-
-
-def add_reference_free_energy(composition_scaling_df: pd.DataFrame, reference_df: pd.DataFrame) -> pd.DataFrame:
-    """Fill in the free energy of the reference composition for composition_scaling results.
-
-    A composition_scaling job gives only the free energy of the transformation from the reference
-    composition (``delta_free_energy``). The free energy of the reference itself comes from an ``fe`` job
-    at the same temperature, pressure and reference phase, read with gather_calphy_results_detailed.
-
-    Parameters
-    ----------
-    composition_scaling_df : pd.DataFrame
-        Rows of composition_scaling jobs from gather_calphy_results_detailed
-    reference_df : pd.DataFrame
-        Rows of the fe jobs of the reference composition from gather_calphy_results_detailed
-
-    Returns
-    -------
-    pd.DataFrame
-        A copy of composition_scaling_df with ``reference_free_energy``, ``free_energy`` (reference +
-        ``delta_free_energy``, without the ideal-mixing term) and ``free_energy_with_ideal_entropy`` (reference +
-        ``delta_free_energy_with_ideal_entropy``)
-
-    Raises
-    ------
-    ValueError
-        If a row has no fe job, or more than one, with its temperature, pressure and reference phase
-    """
-    result = composition_scaling_df.copy()
-    fe_jobs = reference_df[(reference_df["calculation_mode"] == "fe") & reference_df["status"]]
-    for index, row in result.iterrows():
-        if row["calculation_mode"] != "composition_scaling":
-            raise ValueError(f"row {index} is a '{row['calculation_mode']}' job, not composition_scaling")
-        match = fe_jobs[
-            fe_jobs.apply(
-                lambda ref: _same_value(ref["temperature"], row["temperature"])
-                and _same_value(ref["pressure"], row["pressure"])
-                and ref["reference_phase"] == row["reference_phase"],
-                axis=1,
-            )
-        ]
-        if len(match) != 1:
-            raise ValueError(
-                f"expected exactly one finished fe job at T={row['temperature']}, pressure={row['pressure']}, "
-                f"reference phase {row['reference_phase']} for row {index}, found {len(match)}"
-            )
-        reference_free_energy = float(match.iloc[0]["free_energy"])
-        result.at[index, "reference_free_energy"] = reference_free_energy
-        result.at[index, "free_energy"] = reference_free_energy + row["delta_free_energy"]
-        result.at[index, "free_energy_with_ideal_entropy"] = reference_free_energy + row["delta_free_energy_with_ideal_entropy"]
-    return result
 
 
 def calc_free_energy_with_calphy(

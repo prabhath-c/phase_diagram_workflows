@@ -427,6 +427,8 @@ def _write_calphy_folder(folder, input_overrides, report):
     (folder / "input_file.yaml").write_text(yaml.safe_dump({"calculations": [calculation]}))
     if report is not None:
         (folder / "report.yaml").write_text(yaml.safe_dump(report))
+        if input_overrides.get("mode") == "composition_scaling":    # a finished job has its forward sweep
+            (folder / "forward_1.dat").write_text("# dU_1 dU_2 lambda\n-3.5 -3.3 1.0\n-3.5 -3.3 0.0\n")
     return str(folder)
 
 
@@ -474,7 +476,7 @@ class TestGatherCompositionScalingResults:
         )
         assert row["dissipation"] == pytest.approx(2.539714182888536e-05)
 
-    def test_reference_dependent_columns_are_empty_until_the_reference_is_added(self, tmp_path):
+    def test_results_have_only_the_difference_not_an_absolute_free_energy(self, tmp_path):
         from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
 
         folder = _write_calphy_folder(
@@ -482,8 +484,50 @@ class TestGatherCompositionScalingResults:
         )
         row = gather_calphy_results_detailed(folder).iloc[0]
 
-        for column in ["reference_free_energy", "free_energy", "free_energy_with_ideal_entropy"]:
-            assert pd.isna(row[column])
+        # no absolute free energy, and no placeholder for one
+        for column in ["free_energy", "reference_free_energy", "free_energy_with_ideal_entropy"]:
+            assert column not in row.index
+
+    def test_running_job_has_no_energy_of_the_target_and_no_warning(self, tmp_path):
+        """No report.yaml yet: forward_1.dat is still being written, even with a single row, and that is normal."""
+        import warnings
+        from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
+
+        folder = _write_calphy_folder(tmp_path / "cs", {"mode": "composition_scaling", "reference_composition": 0.0}, None)
+        (tmp_path / "cs" / "forward_1.dat").write_text("# dU_1 dU_2 lambda\n-3.5 -3.3 1.0\n")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            row = gather_calphy_results_detailed(folder).iloc[0]
+
+        assert pd.isna(row["energy_target"])
+
+    def test_finished_job_with_an_empty_forward_file_warns_and_gives_nan(self, tmp_path):
+        from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
+
+        folder = _write_calphy_folder(
+            tmp_path / "cs", {"mode": "composition_scaling", "reference_composition": 0.0}, COMPOSITION_SCALING_REPORT
+        )
+        (tmp_path / "cs" / "forward_1.dat").write_text("# dU_1 dU_2 lambda\n")
+
+        with pytest.warns(UserWarning, match="has no data"):
+            row = gather_calphy_results_detailed(folder).iloc[0]
+
+        assert pd.isna(row["energy_target"])
+        assert row["delta_free_energy"] == pytest.approx(0.11447121891913319)   # the rest of the row is not affected
+
+    def test_finished_job_without_a_forward_file_warns_and_gives_nan(self, tmp_path):
+        from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
+
+        folder = _write_calphy_folder(
+            tmp_path / "cs", {"mode": "composition_scaling", "reference_composition": 0.0}, COMPOSITION_SCALING_REPORT
+        )
+        (tmp_path / "cs" / "forward_1.dat").unlink()
+
+        with pytest.warns(UserWarning, match="no forward_1.dat"):
+            row = gather_calphy_results_detailed(folder).iloc[0]
+
+        assert pd.isna(row["energy_target"])
 
     def test_job_without_report_gives_nan_not_an_error(self, tmp_path):
         from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
@@ -521,55 +565,3 @@ class TestGatherCompositionScalingResults:
         ).iloc[0]
 
         assert row["dissipation"] == pytest.approx(1e-5)
-
-
-class TestAddReferenceFreeEnergy:
-    """add_reference_free_energy()"""
-
-    @staticmethod
-    def _gather_pair(tmp_path, fe_temperature=500):
-        from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
-
-        cs = gather_calphy_results_detailed(_write_calphy_folder(
-            tmp_path / "cs", {"mode": "composition_scaling", "reference_composition": 0.0}, COMPOSITION_SCALING_REPORT
-        ))
-        fe = gather_calphy_results_detailed(_write_calphy_folder(
-            tmp_path / "fe", {"mode": "fe", "temperature": fe_temperature}, FE_REPORT
-        ))
-        return cs, fe
-
-    def test_reference_plus_delta_with_and_without_the_entropy_term(self, tmp_path):
-        from phase_diagram_workflows.free_energies.ti_calculator import add_reference_free_energy
-
-        cs, fe = self._gather_pair(tmp_path)
-        row = add_reference_free_energy(cs, fe).iloc[0]
-
-        assert row["reference_free_energy"] == pytest.approx(-3.5)
-        assert row["free_energy"] == pytest.approx(-3.5 + 0.11447121891913319)
-        assert row["free_energy_with_ideal_entropy"] == pytest.approx(
-            -3.5 + 0.11447121891913319 + 500 * -1.7106720095272323e-05
-        )
-
-    def test_input_is_not_modified(self, tmp_path):
-        from phase_diagram_workflows.free_energies.ti_calculator import add_reference_free_energy
-
-        cs, fe = self._gather_pair(tmp_path)
-        add_reference_free_energy(cs, fe)
-
-        assert pd.isna(cs.iloc[0]["free_energy"])
-
-    def test_no_reference_at_the_temperature_raises(self, tmp_path):
-        from phase_diagram_workflows.free_energies.ti_calculator import add_reference_free_energy
-
-        cs, fe = self._gather_pair(tmp_path, fe_temperature=600)
-
-        with pytest.raises(ValueError, match="found 0"):
-            add_reference_free_energy(cs, fe)
-
-    def test_a_non_composition_scaling_row_raises(self, tmp_path):
-        from phase_diagram_workflows.free_energies.ti_calculator import add_reference_free_energy
-
-        _, fe = self._gather_pair(tmp_path)
-
-        with pytest.raises(ValueError, match="not composition_scaling"):
-            add_reference_free_energy(fe, fe)

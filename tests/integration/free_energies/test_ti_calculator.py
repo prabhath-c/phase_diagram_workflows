@@ -228,10 +228,12 @@ class TestCompositionScalingRealCalphy:
         assert bool(row["status"]) is True
         assert row["calculation_mode"] == "composition_scaling"
         assert row["reference_phase"] == "solid"
-        # the job gives the free energy of the transformation only; free_energy needs the reference (add_reference_free_energy)
-        assert row["delta_free_energy"] == pytest.approx(0.0, abs=1.0)
+        # the job gives the free-energy difference to the starting composition only: there is no absolute free energy
         assert np.isfinite(row["delta_free_energy"])
-        assert row["free_energy"] != row["free_energy"]  # NaN until the reference is added
+        # turning Al into Mg costs about 1.9 eV per transformed atom with this EAM potential: positive, and well below 3 eV per atom
+        assert 0.0 < row["delta_free_energy"] < 3.0 * n_mg_target / n_atoms
+        assert abs(row["dissipation"]) < 1e-3    # eV/atom: the switching is reversible (about 3e-5 here)
+        assert "free_energy" not in row.index
         assert row["composition"]["Mg"] == pytest.approx(n_mg_target / n_atoms, abs=1e-6)
 
 
@@ -298,8 +300,10 @@ class TestCompositionScalingWithExternalLmp:
         assert bool(row["status"]) is True
         assert row["calculation_mode"] == "composition_scaling"
         assert row["reference_phase"] == "solid"
-        # the job gives the free energy of the transformation only; free_energy needs the reference (add_reference_free_energy)
-        assert row["delta_free_energy"] == pytest.approx(0.0, abs=1.0)
+        # the job gives the free-energy difference to the starting composition only: there is no absolute free energy
         assert np.isfinite(row["delta_free_energy"])
-        assert row["free_energy"] != row["free_energy"]  # NaN until the reference is added
+        # turning Al into Mg costs about 1.9 eV per transformed atom with this EAM potential: positive, and well below 3 eV per atom
+        assert 0.0 < row["delta_free_energy"] < 3.0 * n_mg_target / n_atoms
+        assert abs(row["dissipation"]) < 1e-3    # eV/atom: the switching is reversible (about 3e-5 here)
+        assert "free_energy" not in row.index
         assert row["composition"]["Mg"] == pytest.approx(n_mg_target / n_atoms, abs=1e-6)
