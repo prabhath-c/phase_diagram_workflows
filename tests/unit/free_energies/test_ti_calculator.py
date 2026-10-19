@@ -8,6 +8,7 @@ tests/integration/free_energies/test_ti_calculator.py for real-execution
 coverage of gather_calphy_results_detailed.
 """
 
+import os
 import tempfile
 from unittest.mock import Mock, patch
 
@@ -400,3 +401,161 @@ class TestRunCalphyDispatch:
 
             mock_solid.assert_called_once_with(calculation=input_class, simfolder=tmpdir)
             mock_routine_fe.assert_called_once_with(mock_job)
+
+
+def _write_calphy_folder(folder, input_overrides, report):
+    """A minimal calphy output folder: input_file.yaml and (if report is not None) report.yaml."""
+    import yaml
+
+    folder.mkdir(parents=True, exist_ok=True)
+    calculation = {"reference_phase": "solid", "pressure": 0.0, "temperature": 500}
+    calculation.update(input_overrides)
+    (folder / "input_file.yaml").write_text(yaml.safe_dump({"calculations": [calculation]}))
+    if report is not None:
+        (folder / "report.yaml").write_text(yaml.safe_dump(report))
+    return str(folder)
+
+
+# the values of the ACE test job: 500 atoms of Al, 25 turned into Mg, 500 K
+COMPOSITION_SCALING_REPORT = {
+    "input": {"element": "Al Mg", "concentration": "0.95 0.05"},
+    "results": {
+        "free_energy": 0.11447121891913319,
+        "work": 0.11413362158866863,
+        "mass_correction": -0.00033759733046455234,
+        "dissipation": 2.539714182888536e-05,
+        "entropy_contribution": -1.7106720095272323e-05,
+        "error": 0.0,
+    },
+}
+FE_REPORT = {
+    "input": {"element": "Al", "concentration": "1.0"},
+    "results": {"free_energy": -3.5, "dissipation": 1e-5},
+}
+
+
+class TestGatherCompositionScalingResults:
+    """gather_calphy_results_detailed() for mode='composition_scaling'"""
+
+    def test_delta_and_the_pieces_of_it_are_separate_columns(self, tmp_path):
+        from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
+
+        folder = _write_calphy_folder(
+            tmp_path / "cs", {"mode": "composition_scaling", "reference_composition": 0.0}, COMPOSITION_SCALING_REPORT
+        )
+        row = gather_calphy_results_detailed(folder).iloc[0]
+
+        assert row["calculation_mode"] == "composition_scaling"
+        assert row["status"]
+        assert row["composition"] == pytest.approx({"Al": 0.95, "Mg": 0.05})
+        assert row["reference_composition"] == 0.0
+        assert row["delta_free_energy"] == pytest.approx(0.11447121891913319)
+        assert row["work"] == pytest.approx(0.11413362158866863)
+        assert row["mass_correction"] == pytest.approx(-0.00033759733046455234)
+        # calphy's convention: ideal_entropy = -entropy_contribution of the report (positive, eV/atom/K),
+        # and fix_composition_scaling subtracts T * ideal_entropy
+        assert row["ideal_entropy"] == pytest.approx(1.7106720095272323e-05)
+        assert row["delta_free_energy_with_ideal_entropy"] == pytest.approx(
+            0.11447121891913319 - 500 * 1.7106720095272323e-05
+        )
+        assert row["dissipation"] == pytest.approx(2.539714182888536e-05)
+
+    def test_reference_dependent_columns_are_empty_until_the_reference_is_added(self, tmp_path):
+        from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
+
+        folder = _write_calphy_folder(
+            tmp_path / "cs", {"mode": "composition_scaling", "reference_composition": 0.0}, COMPOSITION_SCALING_REPORT
+        )
+        row = gather_calphy_results_detailed(folder).iloc[0]
+
+        for column in ["reference_free_energy", "free_energy", "free_energy_with_ideal_entropy"]:
+            assert pd.isna(row[column])
+
+    def test_job_without_report_gives_nan_not_an_error(self, tmp_path):
+        from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
+
+        folder = _write_calphy_folder(
+            tmp_path / "cs", {"mode": "composition_scaling", "reference_composition": 0.0}, None
+        )
+        row = gather_calphy_results_detailed(folder).iloc[0]
+
+        assert not row["status"]
+        assert pd.isna(row["delta_free_energy"])
+        assert pd.isna(row["dissipation"]) and pd.isna(row["energy_target"])
+
+    def test_energy_of_the_target_is_read_from_the_end_of_the_forward_switching(self, tmp_path):
+        import numpy as np
+        from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
+
+        folder = _write_calphy_folder(
+            tmp_path / "cs", {"mode": "composition_scaling", "reference_composition": 0.0}, COMPOSITION_SCALING_REPORT
+        )
+        lam = np.linspace(1.0, 0.0, 1000)
+        for iteration, target_energy in [(1, -3.35), (2, -3.37)]:   # dU_1 is the reference potential: it must not be used
+            rows = np.column_stack([np.full_like(lam, -3.58), np.full_like(lam, target_energy), lam])
+            np.savetxt(tmp_path / "cs" / f"forward_{iteration}.dat", rows, header="dU_1[eV/atom] dU_2[eV/atom] lambda")
+
+        row = gather_calphy_results_detailed(folder).iloc[0]
+
+        assert row["energy_target"] == pytest.approx(-3.36)   # mean over the two iterations
+
+    def test_reference_fe_job_gives_dissipation(self, tmp_path):
+        from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
+
+        row = gather_calphy_results_detailed(
+            _write_calphy_folder(tmp_path / "fe", {"mode": "fe"}, FE_REPORT)
+        ).iloc[0]
+
+        assert row["dissipation"] == pytest.approx(1e-5)
+
+
+class TestAddReferenceFreeEnergy:
+    """add_reference_free_energy()"""
+
+    @staticmethod
+    def _gather_pair(tmp_path, fe_temperature=500):
+        from phase_diagram_workflows.free_energies.ti_calculator import gather_calphy_results_detailed
+
+        cs = gather_calphy_results_detailed(_write_calphy_folder(
+            tmp_path / "cs", {"mode": "composition_scaling", "reference_composition": 0.0}, COMPOSITION_SCALING_REPORT
+        ))
+        fe = gather_calphy_results_detailed(_write_calphy_folder(
+            tmp_path / "fe", {"mode": "fe", "temperature": fe_temperature}, FE_REPORT
+        ))
+        return cs, fe
+
+    def test_reference_plus_delta_with_and_without_the_entropy_term(self, tmp_path):
+        from phase_diagram_workflows.free_energies.ti_calculator import add_reference_free_energy
+
+        cs, fe = self._gather_pair(tmp_path)
+        row = add_reference_free_energy(cs, fe).iloc[0]
+
+        assert row["reference_free_energy"] == pytest.approx(-3.5)
+        assert row["free_energy"] == pytest.approx(-3.5 + 0.11447121891913319)
+        assert row["free_energy_with_ideal_entropy"] == pytest.approx(
+            -3.5 + 0.11447121891913319 + 500 * -1.7106720095272323e-05
+        )
+
+    def test_input_is_not_modified(self, tmp_path):
+        from phase_diagram_workflows.free_energies.ti_calculator import add_reference_free_energy
+
+        cs, fe = self._gather_pair(tmp_path)
+        add_reference_free_energy(cs, fe)
+
+        assert pd.isna(cs.iloc[0]["free_energy"])
+
+    def test_no_reference_at_the_temperature_raises(self, tmp_path):
+        from phase_diagram_workflows.free_energies.ti_calculator import add_reference_free_energy
+
+        cs, fe = self._gather_pair(tmp_path, fe_temperature=600)
+
+        with pytest.raises(ValueError, match="found 0"):
+            add_reference_free_energy(cs, fe)
+
+    def test_a_non_composition_scaling_row_raises(self, tmp_path):
+        from phase_diagram_workflows.free_energies.ti_calculator import add_reference_free_energy
+
+        _, fe = self._gather_pair(tmp_path)
+
+        with pytest.raises(ValueError, match="not composition_scaling"):
+            add_reference_free_energy(fe, fe)
