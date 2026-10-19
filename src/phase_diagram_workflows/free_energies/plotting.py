@@ -74,7 +74,8 @@ def plot_forward_backward_composition_scaling(
     for path, label in zip(paths, ("forward", "backward")):
         u_reference, u_target, lam = np.loadtxt(path, comments="#", unpack=True)
         ax.plot(mean(lam), mean(u_target - u_reference), label=label)
-    ax.set_title(f"{result['temperature']:.0f} K, c={result['composition']['Mg']:.3f}, dissipation={abs(result['dissipation']):.3e}")
+    composition = "_".join(f"{element}_{fraction:.3f}" for element, fraction in result["composition"].items())
+    ax.set_title(f"{result['temperature']:.0f} K, {composition}, dissipation={abs(result['dissipation']):.3e}")
     ax.legend()
     if new_figure:
         fig.tight_layout()

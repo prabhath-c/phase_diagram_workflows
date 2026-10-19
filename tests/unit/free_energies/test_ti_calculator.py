@@ -385,6 +385,20 @@ class TestRunCalphyDispatch:
                 calculation=input_class, simfolder=tmpdir, lmp=sentinel_lmp
             )
 
+    @patch('calphy.Alchemy')
+    def test_composition_scaling_rejects_an_invalid_reference_phase(self, mock_alchemy):
+        """The reference_phase is checked for every mode, not only for fe and ts."""
+        from phase_diagram_workflows.free_energies.ti_calculator import _run_calphy
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lattice_path = os.path.join(tmpdir, 'input_structure.data')
+            input_class = self._make_input_class('composition_scaling', 'gas', lattice_path)
+
+            with pytest.raises(ValueError, match="Invalid reference_phase"):
+                _run_calphy(input_class=input_class)
+
+            mock_alchemy.assert_not_called()
+
     @patch('calphy.routines.routine_fe')
     @patch('calphy.Solid')
     def test_fe_mode_still_dispatches_to_solid(self, mock_solid, mock_routine_fe):

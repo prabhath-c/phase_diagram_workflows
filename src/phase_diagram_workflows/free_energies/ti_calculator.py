@@ -71,10 +71,16 @@ def _run_calphy(input_class: Calculation, lmp: Optional[Any] = None) -> None:
             from calphy import Solid, Liquid, Alchemy
             from calphy.routines import routine_fe, routine_ts, routine_composition_scaling
 
-            # mode dictates the job class, matching calphy's own dispatch in
-            # calphy/queuekernel.py: "alchemy"/"composition_scaling" always run
-            # through Alchemy (it owns the switching + MC-swap + mass_integration
-            # machinery), regardless of reference_phase.
+            if input_class.reference_phase not in ("solid", "liquid"):
+                raise ValueError(
+                    f"Invalid reference_phase: {input_class.reference_phase}. "
+                    "Must be 'solid' or 'liquid'"
+                )
+
+            # composition_scaling always runs through calphy's Alchemy class (it owns the
+            # switching + MC-swap + mass_integration machinery), regardless of reference_phase.
+            # This is how calphy's own dispatcher in calphy/queuekernel.py treats it; that
+            # dispatcher routes mode "alchemy" the same way, which is not supported here.
             if input_class.mode == "composition_scaling":
                 if lmp is not None:
                     job = Alchemy(calculation=input_class, simfolder=working_directory, lmp=lmp)
@@ -85,16 +91,11 @@ def _run_calphy(input_class: Calculation, lmp: Optional[Any] = None) -> None:
                     job = Solid(calculation=input_class, simfolder=working_directory, lmp=lmp)
                 else:
                     job = Solid(calculation=input_class, simfolder=working_directory)
-            elif input_class.reference_phase == "liquid":
+            else:  # liquid
                 if lmp is not None:
                     job = Liquid(calculation=input_class, simfolder=working_directory, lmp=lmp)
                 else:
                     job = Liquid(calculation=input_class, simfolder=working_directory)
-            else:
-                raise ValueError(
-                    f"Invalid reference_phase: {input_class.reference_phase}. "
-                    "Must be 'solid' or 'liquid'"
-                )
 
             if input_class.mode == "fe":
                 routine_fe(job)
@@ -182,7 +183,7 @@ def gather_calphy_results_detailed(working_directory: str) -> pd.DataFrame:
 
         Additional columns of ``composition_scaling``, all in eV/atom unless noted. A composition_scaling job gives only
         the free energy of the transformation FROM the reference composition (``reference_composition``), not an
-        absolute free energy; the reference comes from a separate fe (or ts) calculation and is added with
+        absolute free energy; the reference comes from a separate fe calculation and is added with
         ``add_reference_free_energy``.
 
         - reference_composition: c(Mg) of the starting structure

@@ -44,7 +44,7 @@ class TestPlotForwardBackwardCompositionScaling:
         assert [line.get_label() for line in ax.get_lines()] == ["forward", "backward"]
         assert ax.get_xlabel() == "lambda"
         assert ax.get_ylabel() == "Energy difference [eV/atom]"
-        assert ax.get_title() == "500 K, c=0.050, dissipation=2.540e-05"
+        assert ax.get_title() == "500 K, Al_0.950_Mg_0.050, dissipation=2.540e-05"
         assert ax.get_legend() is not None
         plt.close(fig)
 

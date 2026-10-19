@@ -230,7 +230,7 @@ class TestCompositionScalingRealCalphy:
         assert row["reference_phase"] == "solid"
         # the job gives the free energy of the transformation only; free_energy needs the reference (add_reference_free_energy)
         assert row["delta_free_energy"] == pytest.approx(0.0, abs=1.0)
-        assert row["delta_free_energy"] == row["delta_free_energy"]  # not NaN
+        assert np.isfinite(row["delta_free_energy"])
         assert row["free_energy"] != row["free_energy"]  # NaN until the reference is added
         assert row["composition"]["Mg"] == pytest.approx(n_mg_target / n_atoms, abs=1e-6)
 
@@ -300,6 +300,6 @@ class TestCompositionScalingWithExternalLmp:
         assert row["reference_phase"] == "solid"
         # the job gives the free energy of the transformation only; free_energy needs the reference (add_reference_free_energy)
         assert row["delta_free_energy"] == pytest.approx(0.0, abs=1.0)
-        assert row["delta_free_energy"] == row["delta_free_energy"]  # not NaN
+        assert np.isfinite(row["delta_free_energy"])
         assert row["free_energy"] != row["free_energy"]  # NaN until the reference is added
         assert row["composition"]["Mg"] == pytest.approx(n_mg_target / n_atoms, abs=1e-6)
