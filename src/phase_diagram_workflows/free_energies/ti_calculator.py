@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from typing import Dict, Any, Tuple, Optional, List
 from pathlib import Path
 
@@ -58,7 +59,7 @@ def _run_calphy(input_class: Calculation, lmp: Optional[Any] = None) -> None:
     ------
     ValueError
         If reference_phase is not 'solid' or 'liquid'
-        If mode is not 'fe' (free energy) or 'ts' (temperature scaling)
+        If mode is not 'fe' (free energy), 'ts' (temperature scaling), or 'composition_scaling'
     RuntimeError
         If calphy execution fails
     """
@@ -68,31 +69,44 @@ def _run_calphy(input_class: Calculation, lmp: Optional[Any] = None) -> None:
 
     with _working_directory_context(working_directory):
         try:
-            from calphy import Solid, Liquid
-            from calphy.routines import routine_fe, routine_ts
-            if input_class.reference_phase == "solid":
-                if lmp is not None:
-                    job = Solid(calculation=input_class, simfolder=working_directory, lmp=lmp)
-                else:
-                    job = Solid(calculation=input_class, simfolder=working_directory)
-            elif input_class.reference_phase == "liquid":
-                if lmp is not None:
-                    job = Liquid(calculation=input_class, simfolder=working_directory, lmp=lmp)
-                else:
-                    job = Liquid(calculation=input_class, simfolder=working_directory)
-            else:
+            from calphy import Solid, Liquid, Alchemy
+            from calphy.routines import routine_fe, routine_ts, routine_composition_scaling
+
+            if input_class.reference_phase not in ("solid", "liquid"):
                 raise ValueError(
                     f"Invalid reference_phase: {input_class.reference_phase}. "
                     "Must be 'solid' or 'liquid'"
                 )
 
+            # composition_scaling always runs through calphy's Alchemy class (it owns the
+            # switching + MC-swap + mass_integration machinery), regardless of reference_phase.
+            # This is how calphy's own dispatcher in calphy/queuekernel.py treats it; that
+            # dispatcher routes mode "alchemy" the same way, which is not supported here.
+            if input_class.mode == "composition_scaling":
+                if lmp is not None:
+                    job = Alchemy(calculation=input_class, simfolder=working_directory, lmp=lmp)
+                else:
+                    job = Alchemy(calculation=input_class, simfolder=working_directory)
+            elif input_class.reference_phase == "solid":
+                if lmp is not None:
+                    job = Solid(calculation=input_class, simfolder=working_directory, lmp=lmp)
+                else:
+                    job = Solid(calculation=input_class, simfolder=working_directory)
+            else:  # liquid
+                if lmp is not None:
+                    job = Liquid(calculation=input_class, simfolder=working_directory, lmp=lmp)
+                else:
+                    job = Liquid(calculation=input_class, simfolder=working_directory)
+
             if input_class.mode == "fe":
                 routine_fe(job)
             elif input_class.mode == "ts":
                 routine_ts(job)
+            elif input_class.mode == "composition_scaling":
+                routine_composition_scaling(job)
             else:
                 raise ValueError(
-                    f"Invalid mode: {input_class.mode}. Must be 'fe' or 'ts'"
+                    f"Invalid mode: {input_class.mode}. Must be 'fe', 'ts', or 'composition_scaling'"
                 )
         except ValueError:
             raise
@@ -120,11 +134,38 @@ def gather_calphy_results(parent_directory: str) -> pd.DataFrame:
     return df
 
 
+def _target_energy_at_end_of_forward_switching(working_directory: str, n_last: int = 100) -> float:
+    """Potential energy per atom (eV/atom) of the target composition at the end of the forward switching.
+
+    Read from ``forward_<i>.dat`` of a composition_scaling job (columns dU_1, dU_2, lambda): at lambda = 0 only the
+    potential of the target composition is left, so dU_2 over the last ``n_last`` rows is its energy per atom.
+    Averaged over the iterations. A target that melted shows as a jump of this energy against its neighbours in
+    concentration or temperature. NaN, with a warning, if forward_1.dat is missing or has no data: call it for a
+    finished job only (a running job has no report.yaml yet and its files are still being written).
+    """
+    energies = []
+    iteration = 1
+    while os.path.exists(path := os.path.join(working_directory, f"forward_{iteration}.dat")):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")    # numpy warns that an empty file "contained no data"
+            values = np.loadtxt(path, comments="#", usecols=1, ndmin=1)
+        if values.size == 0:
+            warnings.warn(f"{path} has no data: energy_target is NaN")
+            return np.nan
+        energies.append(float(values[-n_last:].mean()))
+        iteration += 1
+    if not energies:
+        warnings.warn(f"no forward_1.dat in {working_directory}: energy_target is NaN")
+        return np.nan
+    return float(np.mean(energies))
+
+
 def gather_calphy_results_detailed(working_directory: str) -> pd.DataFrame:
     """Read calphy results from a single calculation directory.
 
     Independent of calphy's gather_results. Reads temperature sweep data
     and forward/backward energy differences for phase-transition checking.
+    The three modes give different columns, see Returns.
 
     Parameters
     ----------
@@ -136,18 +177,38 @@ def gather_calphy_results_detailed(working_directory: str) -> pd.DataFrame:
     pd.DataFrame
         Single-row DataFrame with columns:
         - calculation: folder name
-        - calculation_mode: 'ts' or 'fe'
+        - calculation_mode: 'ts', 'fe' or 'composition_scaling'
         - reference_phase: 'solid' or 'liquid'
         - pressure: float
         - status: bool
-        - composition: dict mapping element to concentration
-        - temperature: array (ts) or scalar (fe)
-        - free_energy: array (ts) or scalar (fe)
-        - free_energy_error: array (ts) or 0.0 (fe)
+        - composition: dict mapping element to concentration (the target composition for composition_scaling)
+        - temperature: array (ts) or scalar (fe, composition_scaling)
+        - free_energy: array (ts) or scalar (fe); for composition_scaling see below
+        - free_energy_error: array (ts), 0.0 (fe), or the error calphy reports (composition_scaling; 0.0 with one iteration)
         - forward_energy_diff: list of arrays, one per iteration (ts only)
         - backward_energy_diff: list of arrays, one per iteration (ts only)
         - forward_lambda: list of arrays, one per iteration (ts only)
         - backward_lambda: list of arrays, one per iteration (ts only)
+        - dissipation: eV/atom, scalar (fe, composition_scaling): half the sum of the forward and backward work; about
+          zero when the switching is reversible, large when the phase melts or changes along the way
+
+        Additional columns of ``composition_scaling``, all in eV/atom unless noted. A composition_scaling job gives only
+        the free-energy DIFFERENCE from the reference composition (``reference_composition``), never an absolute free
+        energy: there is no ``free_energy`` column for this mode. To get one, add the free energy of the reference
+        composition (for example from an fe calculation) to ``delta_free_energy`` yourself.
+
+        - reference_composition: c(Mg) of the starting structure
+        - delta_free_energy: free-energy difference to the reference composition, work + mass correction, WITHOUT the
+          ideal-mixing term
+        - work, mass_correction: the two parts of delta_free_energy (delta = work - mass_correction)
+        - ideal_entropy: eV/atom/K, positive; calphy's convention (calphy.postprocessing), minus the
+          ``entropy_contribution`` of calphy's report. The ideal-mixing term of the transformation is
+          ``-temperature * ideal_entropy`` (it lowers the free energy), as in calphy's ``fix_composition_scaling``
+        - delta_free_energy_with_ideal_entropy: delta_free_energy - temperature * ideal_entropy
+        - energy_target: potential energy per atom of the target composition at the end of the forward switching
+          (average over the iterations). A melted target shows as a jump of it against its neighbours in
+          concentration or temperature. NaN while the job is running; NaN with a warning if the job is finished but
+          forward_1.dat is missing or empty
 
     Raises
     ------
@@ -221,16 +282,40 @@ def gather_calphy_results_detailed(working_directory: str) -> pd.DataFrame:
         data["forward_lambda"] = f_lambdas if f_lambdas else None
         data["backward_lambda"] = b_lambdas if b_lambdas else None
 
+    elif mode == "composition_scaling":
+        # the job gives only the free-energy difference from the reference composition: no absolute free energy,
+        # so no free_energy column
+        results = rep["results"] if rep else {}
+        data["temperature"] = inp["temperature"]
+        data["reference_composition"] = inp["reference_composition"]
+        data["delta_free_energy"] = results.get("free_energy", np.nan)    # work + mass correction
+        data["work"] = results.get("work", np.nan)
+        data["mass_correction"] = results.get("mass_correction", np.nan)
+        data["dissipation"] = results.get("dissipation", np.nan)    # eV/atom, half the forward + backward work: ~0 when reversible
+        # eV/atom of the target composition at the end of the forward switching; a running job (no report yet) has none
+        data["energy_target"] = _target_energy_at_end_of_forward_switching(wd) if rep else np.nan
+        # calphy's convention (calphy.postprocessing): ideal_entropy = -entropy_contribution of the report, positive, eV/atom/K;
+        # the ideal-mixing term enters as F - T * ideal_entropy (calphy's fix_composition_scaling)
+        data["ideal_entropy"] = -results.get("entropy_contribution", np.nan)
+        data["delta_free_energy_with_ideal_entropy"] = data["delta_free_energy"] - inp["temperature"] * data["ideal_entropy"]
+        data["free_energy_error"] = results.get("error", np.nan)
+        data["forward_energy_diff"] = None
+        data["backward_energy_diff"] = None
+        data["forward_lambda"] = None
+        data["backward_lambda"] = None
+
     else:  # fe mode
         data["temperature"] = inp["temperature"]
         data["free_energy"] = rep["results"]["free_energy"] if rep else np.nan
         data["free_energy_error"] = 0.0 if rep else np.nan
+        data["dissipation"] = rep["results"].get("dissipation", np.nan) if rep else np.nan
         data["forward_energy_diff"] = None
         data["backward_energy_diff"] = None
         data["forward_lambda"] = None
         data["backward_lambda"] = None
 
     return pd.DataFrame([data])
+
 
 def calc_free_energy_with_calphy(
     input_structure: Atoms,
@@ -254,7 +339,9 @@ def calc_free_energy_with_calphy(
         DataFrame containing potential information in pyiron-compatible format
     calphy_parameters : Dict[str, Any]
         Dictionary with calphy parameters including:
-        - mode: 'fe' (free energy) or 'ts' (temperature scaling)
+        - mode: 'fe' (free energy), 'ts' (temperature scaling), or 'composition_scaling'
+          (alchemical composition transformation with MC identity-exchange swaps;
+          requires 'composition_scaling' and 'monte_carlo' blocks, see calphy.Calculation)
         - temperature: float or list for temperature range
         - reference_phase: 'solid' or 'liquid'
         - n_equilibration_steps, n_switching_steps, n_print_steps
