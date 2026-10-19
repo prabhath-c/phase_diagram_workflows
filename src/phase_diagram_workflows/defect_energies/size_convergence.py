@@ -30,6 +30,7 @@ from ase import Atoms
 
 from phase_diagram_workflows.defect_energies.defect_spec import build_defect, defect_from_orbit
 from phase_diagram_workflows.defect_energies.jobs import follow_jobs, job_tracking, load_job_status, mark_submitted
+from phase_diagram_workflows.defect_energies.relaxation import relax_atoms
 from phase_diagram_workflows.structures.point_defects import (
     compute_formation_energy,
     tile_atomic_sublattices,
@@ -96,29 +97,23 @@ def _formation_energy_at_size(
     swept_element: str,
     ftol: float,
     relax_volume: bool,
+    anisotropic: bool,
+    relax_options: Optional[Dict[str, Any]],
     cores: int,
     folder: str,
 ) -> str:
     """One size: pristine and defect relaxation (positions only, or positions and volume), formation energy; written to ``<folder>/result.pkl``."""
-    from atomistics.calculators.lammps.libcalculator import (
-        calc_static_with_lammpslib,
-        optimize_positions_and_volume_with_lammpslib,
-        optimize_positions_with_lammpslib,
-    )
-
-    optimize = optimize_positions_and_volume_with_lammpslib if relax_volume else optimize_positions_with_lammpslib
+    from atomistics.calculators.lammps.libcalculator import calc_static_with_lammpslib
 
     with job_tracking(folder):   # started.json now, error.txt if this raises
         supercell = unit_cell.repeat(repeat)
         if relax_volume:   # the pristine supercell is relaxed like the defect one, so both energies are at the same pressure
-            supercell_relaxed = optimize(structure=supercell, potential_dataframe=potential_df, ftol=ftol, cores=cores)
+            supercell_relaxed = relax_atoms(supercell, potential_df, relax_volume, ftol, anisotropic, cores, relax_options=relax_options)
             pristine = calc_static_with_lammpslib(structure=supercell_relaxed, potential_dataframe=potential_df, cores=cores)
         else:
             pristine = calc_static_with_lammpslib(structure=supercell, potential_dataframe=potential_df, cores=cores)
         defect_atoms, delta_n = build_defect(supercell, unit_cell, defect)
-        relaxed = optimize(
-            structure=defect_atoms, potential_dataframe=potential_df, ftol=ftol, cores=cores
-        )
+        relaxed = relax_atoms(defect_atoms, potential_df, relax_volume, ftol, anisotropic, cores, relax_options=relax_options)
         E_defect = float(calc_static_with_lammpslib(structure=relaxed, potential_dataframe=potential_df, cores=cores)["energy"])
 
         E_pristine = float(pristine["energy"])
@@ -136,6 +131,8 @@ def _formation_energy_at_size(
             "cores": cores,
             "ftol": ftol,
             "relax_volume": relax_volume,
+            "anisotropic": anisotropic,
+            "relax_options": relax_options or {},
             "defect_structure": relaxed,
         }
         os.makedirs(folder, exist_ok=True)
@@ -159,8 +156,11 @@ def converge_formation_energy(
     element: Optional[str] = None,
     ftol: float = 1e-8,
     relax_volume: bool = False,
+    anisotropic: bool = False,
+    relax_options: Optional[Dict[str, Any]] = None,
     atoms_per_core: int = 350,
     max_cores: int = 16,
+    serial_below: int = 1500,
     executor_spec: Optional[ExecutorSpec] = None,
     follow: bool = False,
     follow_interval: float = 15.0,
@@ -199,11 +199,18 @@ def converge_formation_energy(
     relax_volume : bool, optional
         Relax the cell volume as well as the positions, for the pristine supercell and the defect one alike. Default
         False: the defect relaxes positions only at the fixed cell, and the pristine supercell is a static calculation.
-    atoms_per_core, max_cores : int, optional
-        Parameters of ``cores_for_size``.
+    anisotropic : bool, optional
+        With `relax_volume`: relax all six cell components independently instead of isotropically (see ``relax_structures``).
+        Pristine and defect supercell are relaxed alike. Default False.
+    relax_options : dict, optional
+        More options of the atomistics optimiser (``min_style``, ``etol``, ``maxiter``, ``maxeval``, ``thermo``, and with
+        `relax_volume` ``pressure`` and ``vmax``), see ``relax_atoms``; what is left out takes the atomistics default.
+    atoms_per_core, max_cores, serial_below : int, optional
+        Parameters of ``cores_for_size``: about `atoms_per_core` atoms per MPI rank, at most `max_cores` ranks, and one rank
+        for every cell below `serial_below` atoms (default 1500; 0 switches the serial rule off, so a small cell gets ranks too).
     executor_spec : ExecutorSpec, optional
         e.g. ``ExecutorSpec(SlurmClusterExecutor, {"pysqa_config_directory": ..., "cache_directory": ...,
-        "resource_dict": {"queue": "cmmg", "run_time_limit": 3600}})``. With it, one job per size is submitted,
+        "resource_dict": {"queue": "cmmg", "run_time_max": 3600}})``. With it, one job per size is submitted,
         each with its own cores, and this returns once they are submitted (if the executor can run on without
         this process). ``cores`` and ``threads_per_core`` of the ``resource_dict`` are set per size. Without it
         the sizes run one after the other in this process, on one core.
@@ -236,12 +243,12 @@ def converge_formation_energy(
     for repeat in sizes:
         folder = os.path.join(working_directory, _repeat_name(repeat))
         if not os.path.isfile(os.path.join(folder, RESULT_FILE)):
-            jobs.append((repeat, folder, cores_for_size(len(unit_cell) * int(np.prod(repeat)), atoms_per_core, max_cores)))
+            jobs.append((repeat, folder, cores_for_size(len(unit_cell) * int(np.prod(repeat)), atoms_per_core, max_cores, serial_below)))
 
     for _, folder, _ in jobs:
         mark_submitted(folder)
     arguments = (unit_cell, defect)
-    fixed = (potential_df, mu0, pinned_element, swept_element, ftol, relax_volume)
+    fixed = (potential_df, mu0, pinned_element, swept_element, ftol, relax_volume, anisotropic, relax_options)
     if executor_spec is None:
         for repeat, folder, _ in jobs:
             _formation_energy_at_size(*arguments, repeat, *fixed, 1, folder)

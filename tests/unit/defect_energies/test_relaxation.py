@@ -92,3 +92,105 @@ class TestRelaxStructures:
         assert captured["inner_resource_dict"] == {"cores": 1, "threads_per_core": 3}
         assert captured["outer_resource_dict"] == {"queue": "q"} and captured["cache_directory"] == "c"
         assert list(table["status"]) == ["queued", "queued"]   # submitted, nothing started
+
+    def test_cores_and_oversubscribe_reach_the_task(self, tmp_path, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(relaxation, "run_nested_batch", lambda **kw: captured.update(kw))
+        for oversubscribe in (True, False):
+            relax_structures(
+                {"a": bulk("Al")}, pd.DataFrame(), str(tmp_path / str(oversubscribe)),
+                executor_spec=ExecutorSpec(object, {}), threads_per_structure=4, oversubscribe=oversubscribe,
+            )
+            assert captured["task_fn"].keywords == {"anisotropic": False, "relax_options": None, "cores": 4, "oversubscribe": oversubscribe}
+
+    def test_anisotropic_reaches_the_task(self, tmp_path, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(relaxation, "run_nested_batch", lambda **kw: captured.update(kw))
+        relax_structures({"a": bulk("Mg")}, pd.DataFrame(), str(tmp_path), executor_spec=ExecutorSpec(object, {}), anisotropic=True)
+        assert captured["task_fn"].keywords["anisotropic"] is True
+
+    def test_relax_options_reach_the_task_and_are_checked_before_anything_is_submitted(self, tmp_path, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(relaxation, "run_nested_batch", lambda **kw: captured.update(kw))
+        relax_structures({"a": bulk("Mg")}, pd.DataFrame(), str(tmp_path / "ok"), executor_spec=ExecutorSpec(object, {}),
+                         relax_options={"etol": 1e-12, "vmax": 0.001})
+        assert captured["task_fn"].keywords["relax_options"] == {"etol": 1e-12, "vmax": 0.001}
+        with pytest.raises(ValueError, match="relax_options"):
+            relax_structures({"a": bulk("Mg")}, pd.DataFrame(), str(tmp_path / "bad"), relax_options={"etool": 1e-12})
+        assert not (tmp_path / "bad" / "a").exists()          # nothing was marked as submitted
+
+
+class TestRelaxAtoms:
+    @pytest.fixture
+    def libcalculator(self, monkeypatch):
+        import atomistics.calculators.lammps.libcalculator as libcalculator
+        calls = {"volume": [], "positions": []}
+        monkeypatch.setattr(libcalculator, "optimize_positions_and_volume_with_lammpslib", lambda **kw: calls["volume"].append(kw) or kw["structure"])
+        monkeypatch.setattr(libcalculator, "optimize_positions_with_lammpslib", lambda **kw: calls["positions"].append(kw) or kw["structure"])
+        return calls
+
+    def test_cores_and_oversubscribe_reach_atomistics(self, libcalculator):
+        relaxation.relax_atoms(bulk("Al"), pd.DataFrame(), True, 1e-6, cores=4, oversubscribe=True)
+        assert libcalculator["volume"][0]["cores"] == 4 and libcalculator["volume"][0]["oversubscribe"] is True
+
+    def test_positions_only_never_touches_the_cell_even_if_anisotropic(self, libcalculator):
+        relaxation.relax_atoms(bulk("Mg"), pd.DataFrame(), False, 1e-6, anisotropic=True)
+        assert len(libcalculator["positions"]) == 1 and not libcalculator["volume"]
+
+    def test_isotropic_is_atomistics_own_volume_relaxation(self, libcalculator):
+        relaxation.relax_atoms(bulk("Al"), pd.DataFrame(), True, 1e-6)
+        assert len(libcalculator["volume"]) == 1
+
+    def test_anisotropic_goes_through_the_six_component_box_relax(self, libcalculator, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(relaxation, "_optimize_anisotropic", lambda atoms, potential_df, ftol, options, **kw: seen.update(ftol=ftol, options=options, kw=kw) or atoms)
+        relaxation.relax_atoms(bulk("Mg"), pd.DataFrame(), True, 1e-8, anisotropic=True, cores=2, oversubscribe=True, relax_options={"etol": 1e-10})
+        assert seen == {"ftol": 1e-8, "options": {"etol": 1e-10}, "kw": {"cores": 2, "oversubscribe": True}} and not libcalculator["volume"]
+
+    def test_only_the_options_given_reach_atomistics_so_its_defaults_apply_to_the_rest(self, libcalculator):
+        relaxation.relax_atoms(bulk("Al"), pd.DataFrame(), True, 1e-8)
+        relaxation.relax_atoms(bulk("Al"), pd.DataFrame(), True, 1e-8, relax_options={"etol": 1e-12, "pressure": 100.0, "vmax": 0.001})
+        relaxation.relax_atoms(bulk("Al"), pd.DataFrame(), False, 1e-8, relax_options={"maxiter": 5, "min_style": "fire"})
+        plain, with_options = libcalculator["volume"]
+        assert set(plain) == {"structure", "potential_dataframe", "ftol", "cores", "oversubscribe"}
+        assert {key: with_options[key] for key in ("etol", "pressure", "vmax")} == {"etol": 1e-12, "pressure": 100.0, "vmax": 0.001}
+        assert libcalculator["positions"][0]["maxiter"] == 5 and libcalculator["positions"][0]["min_style"] == "fire"
+
+    def test_unknown_options_and_cell_options_without_a_cell_relaxation_are_refused(self, libcalculator):
+        with pytest.raises(ValueError, match="etool"):
+            relaxation.relax_atoms(bulk("Al"), pd.DataFrame(), True, 1e-8, relax_options={"etool": 1e-12})
+        with pytest.raises(ValueError, match="vmax"):
+            relaxation.relax_atoms(bulk("Al"), pd.DataFrame(), False, 1e-8, relax_options={"vmax": 0.001})
+        with pytest.raises(ValueError, match="argument of its own"):
+            relaxation.relax_atoms(bulk("Al"), pd.DataFrame(), True, 1e-8, relax_options={"ftol": 1e-8})
+
+    @pytest.fixture
+    def sent(self, monkeypatch):
+        import atomistics.calculators.lammps.helpers as helpers
+        sent = {}
+        monkeypatch.setattr(helpers, "lammps_run", lambda **kw: sent.update(kw) or object())
+        monkeypatch.setattr(helpers, "lammps_get_structure", lambda **kw: kw["structure"])
+        monkeypatch.setattr(helpers, "lammps_shutdown", lambda **kw: None)
+        return sent
+
+    def test_the_commands_make_the_box_triclinic_and_relax_all_six_components_with_the_atomistics_defaults(self, sent):
+        import inspect
+        from atomistics.calculators.lammps.libcalculator import optimize_positions_and_volume_with_lammpslib
+        defaults = {name: parameter.default for name, parameter in inspect.signature(optimize_positions_and_volume_with_lammpslib).parameters.items()}
+        relaxation._optimize_anisotropic(bulk("Mg"), pd.DataFrame(), 1e-8, {})
+        lines = sent["input_template"].splitlines()
+        assert lines[0] == "change_box all triclinic"
+        assert lines[1] == "fix ensemble all box/relax x 0.0 y 0.0 z 0.0 xy 0.0 xz 0.0 yz 0.0"
+        assert f"thermo {defaults['thermo']}" in lines and f"min_style {defaults['min_style']}" in lines
+        assert f"minimize {defaults['etol']} 1e-08 {defaults['maxiter']} {defaults['maxeval']}" in lines
+
+    def test_every_option_given_reaches_the_commands(self, sent):
+        options = {"min_style": "fire", "etol": 1e-12, "maxiter": 50, "maxeval": 500, "thermo": 5, "pressure": 100.0, "vmax": 0.001}
+        relaxation._optimize_anisotropic(bulk("Mg"), pd.DataFrame(), 1e-8, options)
+        lines = sent["input_template"].splitlines()
+        assert lines[1] == "fix ensemble all box/relax x 100.0 y 100.0 z 100.0 xy 0.0 xz 0.0 yz 0.0 vmax 0.001"
+        assert "min_style fire" in lines and "thermo 5" in lines and "minimize 1e-12 1e-08 50 500" in lines
+
+    def test_a_pressure_list_is_taken_component_wise(self, sent):
+        relaxation._optimize_anisotropic(bulk("Mg"), pd.DataFrame(), 1e-8, {"pressure": [1.0, 2.0, 3.0, None, None, None]})
+        assert sent["input_template"].splitlines()[1] == "fix ensemble all box/relax x 1.0 y 2.0 z 3.0"
