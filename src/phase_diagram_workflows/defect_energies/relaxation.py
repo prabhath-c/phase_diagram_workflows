@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import pickle
+from functools import partial
 from typing import Any, Dict, Optional, Sequence, Union
 
 import pandas as pd
@@ -53,25 +54,31 @@ def _as_named_structures(
     return named
 
 
-def _relax_one(atoms: Atoms, potential_df: pd.DataFrame, relax_volume: bool, ftol: float) -> Atoms:
-    """Relax positions, and the cell volume too if `relax_volume`, with atomistics' LAMMPS calculator."""
+def _relax_one(
+    atoms: Atoms, potential_df: pd.DataFrame, relax_volume: bool, ftol: float, cores: int = 1, oversubscribe: bool = False
+) -> Atoms:
+    """Relax positions, and the cell volume too if `relax_volume`, with atomistics' LAMMPS calculator on `cores` MPI ranks."""
     from atomistics.calculators.lammps.libcalculator import (
         optimize_positions_and_volume_with_lammpslib,
         optimize_positions_with_lammpslib,
     )
 
     optimize = optimize_positions_and_volume_with_lammpslib if relax_volume else optimize_positions_with_lammpslib
-    return optimize(structure=atoms, potential_dataframe=potential_df, ftol=ftol)
+    return optimize(structure=atoms, potential_dataframe=potential_df, ftol=ftol, cores=cores, oversubscribe=oversubscribe)
 
 
-def _relax_and_save(item: tuple, potential_df: pd.DataFrame, relax_volume: bool, ftol: float) -> str:
+def _relax_and_save(
+    item: tuple, potential_df: pd.DataFrame, relax_volume: bool, ftol: float, cores: int = 1, oversubscribe: bool = False
+) -> str:
     """Relax one structure and write its ``relaxed.pkl`` (the unit of work that runs inside a job)."""
     from atomistics.calculators.lammps.libcalculator import calc_static_with_lammpslib
 
     name, atoms, folder = item
     with job_tracking(folder):   # started.json now, error.txt if this raises
-        relaxed = _relax_one(atoms, potential_df, relax_volume, ftol)
-        energy = float(calc_static_with_lammpslib(structure=relaxed, potential_dataframe=potential_df)["energy"])
+        relaxed = _relax_one(atoms, potential_df, relax_volume, ftol, cores, oversubscribe)
+        energy = float(calc_static_with_lammpslib(
+            structure=relaxed, potential_dataframe=potential_df, cores=cores, oversubscribe=oversubscribe
+        )["energy"])
 
         temporary = os.path.join(folder, RESULT_FILE + ".tmp")
         with open(temporary, "wb") as handle:
@@ -89,6 +96,7 @@ def relax_structures(
     executor_spec: Optional[ExecutorSpec] = None,
     structures_in_parallel: int = 10,
     threads_per_structure: int = 2,
+    oversubscribe: bool = True,
     follow: bool = False,
     follow_interval: float = 15.0,
     atoms_col: str = "structure",
@@ -121,13 +129,19 @@ def relax_structures(
         Force tolerance of the minimiser, in eV/Angstrom.
     executor_spec : ExecutorSpec, optional
         e.g. ``ExecutorSpec(SlurmClusterExecutor, {"pysqa_config_directory": ..., "cache_directory": ...,
-        "resource_dict": {"queue": "cmmg", "run_time_limit": 3600}})``. With it, one batch job is submitted
+        "resource_dict": {"queue": "cmmg", "run_time_max": 3600}})``. With it, one batch job is submitted
         and this returns at once (if the executor can run on without this process); the batch relaxes
         `structures_in_parallel` structures at a time on its allocation. Do not put ``threads_per_core`` in the
         ``resource_dict``, it follows from `structures_in_parallel` and `threads_per_structure`.
         Without it the structures are relaxed one after the other in this process.
     structures_in_parallel, threads_per_structure : int, optional
-        How many structures run at once in the batch, and how many CPUs each one uses.
+        How many structures run at once in the batch, and how many CPUs each one uses: LAMMPS runs on that many MPI
+        ranks per structure (without `executor_spec`, on one).
+    oversubscribe : bool, optional
+        With more than one CPU per structure: start the MPI ranks with ``mpiexec --oversubscribe``. SLURM starts the step
+        of one structure as one task with `threads_per_structure` CPUs, so Open MPI counts a single slot and refuses to start
+        more ranks without it. Needs a pylammpsmpi whose ``LammpsASELibrary`` takes ``oversubscribe`` (branch
+        ``oversubscribe-ase-wrapper``). Default ``True``; has no effect with one CPU per structure.
     follow : bool, optional
         With an `executor_spec`: stay in this call and print every state change of every structure (queued,
         running, done, failed) every `follow_interval` seconds, until all are finished; raises, with the
@@ -156,13 +170,13 @@ def relax_structures(
     task_args = (potential_df, relax_volume, ftol)
     if executor_spec is None:
         for item in to_run:
-            _relax_and_save(item, *task_args)
+            _relax_and_save(item, potential_df, relax_volume, ftol)   # in this process: one rank
         return load_relaxed_structures(working_directory, names=names)
 
     options = dict(executor_spec.kwargs)
     run_nested_batch(
         items=to_run,
-        task_fn=_relax_and_save,
+        task_fn=partial(_relax_and_save, cores=threads_per_structure, oversubscribe=oversubscribe),   # LAMMPS ranks of one structure = the CPUs its step has
         outer_executor_cls=executor_spec.executor_class,
         task_args=task_args,
         outer_resource_dict=options.pop("resource_dict", None),
