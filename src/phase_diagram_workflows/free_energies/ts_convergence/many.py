@@ -39,7 +39,7 @@ from phase_diagram_workflows.free_energies.ts_convergence.single import (
 TOLERANCE_FILE = "tolerance.json"
 
 # the job that waits for the first brackets does no calculation: it reads a few files and submits jobs
-_DEFAULT_COORDINATOR_RESOURCES = {"cores": 1, "threads_per_core": 1, "run_time_limit": 3600}
+_DEFAULT_COORDINATOR_RESOURCES = {"cores": 1, "threads_per_core": 1, "run_time_max": 3600}
 
 
 def _tolerance_path(working_directory: str) -> str:
