@@ -13,6 +13,7 @@ from ase.atoms import Atoms
 from ase.build import bulk
 
 from phase_diagram_workflows.free_energies.ti_helpers import (
+    _ensure_elements_and_masses,
     _validate_calphy_parameters,
     _validate_input_structure,
     _validate_potential_df,
@@ -138,6 +139,37 @@ class TestValidateCalphyParameters:
             'reference_phase': 'liquid'
         }
         _validate_calphy_parameters(params)  # Should not raise
+
+
+class TestEnsureElementsAndMasses:
+    """Tests for _ensure_elements_and_masses()"""
+
+    @staticmethod
+    def _al_mg_potential_df():
+        return pd.DataFrame({"Species": [["Al", "Mg"]]})
+
+    def test_species_absent_from_structure_get_pyiron_placeholder_mass(self):
+        """fe/ts keep pyiron's 1.0 for a species with no atoms in the structure"""
+        params = _ensure_elements_and_masses(
+            bulk("Al", cubic=True), self._al_mg_potential_df(), {"mode": "fe"}
+        )
+        assert params["element"] == ["Al", "Mg"]
+        assert params["mass"] == pytest.approx([26.9815385, 1.0])
+
+    def test_composition_scaling_gets_real_mass_of_every_species(self):
+        """composition_scaling transforms Al into Mg, so the absent Mg needs its real mass"""
+        params = _ensure_elements_and_masses(
+            bulk("Al", cubic=True), self._al_mg_potential_df(), {"mode": "composition_scaling"}
+        )
+        assert params["mass"] == pytest.approx([26.9815385, 24.305])
+
+    def test_explicit_mass_is_kept(self):
+        params = _ensure_elements_and_masses(
+            bulk("Al", cubic=True),
+            self._al_mg_potential_df(),
+            {"mode": "composition_scaling", "mass": [1.0, 2.0]},
+        )
+        assert params["mass"] == [1.0, 2.0]
 
 
 class TestWorkingDirectoryContext:

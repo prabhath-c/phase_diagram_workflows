@@ -88,6 +88,7 @@ phase_diagram_workflows/
 Check out the example notebooks in the `notebooks/` directory:
 
 - **[Al_free_energy_executor_demo.ipynb](notebooks/Al_free_energy_executor_demo.ipynb)** - Demonstrates executor integration
+- **[Al_composition_scaling_demo.ipynb](notebooks/Al_composition_scaling_demo.ipynb)** - Composition scaling: free-energy difference to a starting composition, with the forward/backward plot
 - **[Al_point_defects_demo.ipynb](notebooks/Al_point_defects_demo.ipynb)** - Point-defect structure creation and formation energies
 - **[ts_convergence_single_demo.ipynb](notebooks/ts_convergence_single_demo.ipynb)** - Temperature-scaling bracket convergence
 - **[ConvexHull_MaterialsProject.ipynb](notebooks/ConvexHull_MaterialsProject.ipynb)** - Convex hull construction with Materials Project data

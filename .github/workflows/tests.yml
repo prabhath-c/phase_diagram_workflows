@@ -124,7 +124,9 @@ jobs:
       run: python -m pytest --cov=src/phase_diagram_workflows --cov-report=xml:coverage.xml tests/ -v
 
     - name: Upload coverage reports to Codecov
-      if: matrix.python-version == '3.13' && matrix.os == 'ubuntu-latest'
+      # Temporarily 3.11 (the only version in the matrix above); restore to '3.13' with the full matrix.
+      # if: matrix.python-version == '3.13' && matrix.os == 'ubuntu-latest'
+      if: matrix.python-version == '3.11' && matrix.os == 'ubuntu-latest'
       uses: codecov/codecov-action@v5
       with:
         token: ${{ secrets.CODECOV_TOKEN }}

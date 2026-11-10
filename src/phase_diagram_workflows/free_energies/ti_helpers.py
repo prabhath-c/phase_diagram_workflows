@@ -63,9 +63,9 @@ def _validate_calphy_parameters(calphy_parameters: Dict[str, Any]) -> None:
         raise ValueError(f"calphy_parameters missing required keys: {missing_keys}")
     
     # Validate mode and reference_phase values
-    valid_modes = {'fe', 'ts'}
+    valid_modes = {'fe', 'ts', 'composition_scaling'}
     if calphy_parameters['mode'] not in valid_modes:
-        raise ValueError(f"mode must be 'fe' or 'ts', got '{calphy_parameters['mode']}'")
+        raise ValueError(f"mode must be one of {sorted(valid_modes)}, got '{calphy_parameters['mode']}'")
     
     valid_phases = {'solid', 'liquid'}
     if calphy_parameters['reference_phase'] not in valid_phases:
@@ -273,8 +273,11 @@ def _ensure_elements_and_masses(
             element_symbols = potential_df["Species"].tolist()[0]
             # masses = list([atomic_masses[chemical_symbols.index(el)] for el in element_symbols])    
             
+            # composition_scaling turns atoms into species that are absent from the input structure,
+            # so it needs the real mass of every species; the other modes keep pyiron's 1.0 for them
+            all_real_masses = calphy_parameters.get("mode") == "composition_scaling"
             masses = [
-                atomic_masses[chemical_symbols.index(el)] if el in structure_symbols else 1.0
+                atomic_masses[chemical_symbols.index(el)] if (all_real_masses or el in structure_symbols) else 1.0
                 for el in element_symbols
             ]
 
