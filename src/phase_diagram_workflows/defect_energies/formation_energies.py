@@ -60,6 +60,8 @@ def calculate_formation_energies(
     elements: Optional[Sequence[str]] = None,
     ftol: float = 1e-8,
     relax_volume: bool = False,
+    anisotropic: bool = False,
+    relax_options: Optional[Dict[str, Any]] = None,
     executor_spec: Optional[ExecutorSpec] = None,
     structures_in_parallel: int = 10,
     threads_per_structure: int = 2,
@@ -98,6 +100,12 @@ def calculate_formation_energies(
     relax_volume : bool, optional
         Relax the cell volume as well as the positions, for the pristine supercell and every defect alike. Default False:
         positions only, at the fixed cell of the pristine host.
+    anisotropic : bool, optional
+        With `relax_volume`: relax all six cell components independently instead of isotropically, as in
+        ``relax_structures``. Default False.
+    relax_options : dict, optional
+        More options of the atomistics optimiser (``min_style``, ``etol``, ``maxiter``, ``maxeval``, ``thermo``, and with
+        `relax_volume` ``pressure`` and ``vmax``), see ``relax_atoms``; what is left out takes the atomistics default.
     executor_spec, structures_in_parallel, threads_per_structure, follow, follow_interval
         As in ``relax_structures``.
 
@@ -132,7 +140,7 @@ def calculate_formation_energies(
     structures = {PRISTINE: supercell, **{spec["label"]: atoms for spec, _, _, atoms, _ in defects}}
     table = relax_structures(
         structures, potential_df, working_directory,
-        relax_volume=relax_volume, ftol=ftol, executor_spec=executor_spec,
+        relax_volume=relax_volume, ftol=ftol, anisotropic=anisotropic, relax_options=relax_options, executor_spec=executor_spec,
         structures_in_parallel=min(structures_in_parallel, len(structures)), threads_per_structure=threads_per_structure,
         follow=follow, follow_interval=follow_interval,
     )

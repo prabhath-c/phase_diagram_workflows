@@ -78,3 +78,25 @@ def test_size_convergence_vacancy_is_positions_only_and_matches_a_manual_calcula
     by_hand = E_defect - 32 * mu0["Al"] + mu0["Al"]
     assert table.loc[0, "E_formation"] == pytest.approx(by_hand, abs=1e-8)
     assert 0.3 < table.loc[0, "E_formation"] < 1.2
+
+
+def test_anisotropic_relaxation_lets_the_shape_of_the_cell_change(potential_df, tmp_path):
+    mg = bulk("Mg", a=3.3, c=5.0)                                    # c/a well away from the equilibrium of the potential
+    start = mg.cell.cellpar()[2] / mg.cell.cellpar()[0]
+    isotropic = relax_structures({"mg": mg}, potential_df, str(tmp_path / "iso"), ftol=1e-8).loc["mg"]
+    anisotropic = relax_structures({"mg": mg}, potential_df, str(tmp_path / "aniso"), anisotropic=True, ftol=1e-8).loc["mg"]
+    assert isotropic["c"] / isotropic["a"] == pytest.approx(start, rel=1e-6)           # isotropic: the shape never changes
+    assert anisotropic["c"] / anisotropic["a"] == pytest.approx(1.623, abs=2e-3)       # c/a of the potential
+    assert anisotropic["gamma"] == pytest.approx(120.0) and anisotropic["a"] == pytest.approx(anisotropic["b"], rel=1e-8)
+    assert anisotropic["energy"] < isotropic["energy"] - 1e-6                           # more freedom, lower energy
+
+
+def test_anisotropic_relaxation_also_works_on_an_orthogonal_cell_and_removes_a_shear(potential_df, tmp_path):
+    cubic = bulk("Al", cubic=True, a=4.3).repeat(2)                  # orthogonal box: LAMMPS needs it made triclinic first
+    table = relax_structures({"al": cubic}, potential_df, str(tmp_path / "cubic"), anisotropic=True, ftol=1e-8)
+    assert table.loc["al", "a"] / 2 == pytest.approx(4.05, abs=0.02)
+    sheared = bulk("Mg", a=3.2, c=5.2).repeat(3)
+    cell = sheared.cell.array.copy(); cell[2, 0] += 0.6; cell[2, 1] -= 0.4
+    sheared.set_cell(cell, scale_atoms=True)
+    relaxed = relax_structures({"mg": sheared}, potential_df, str(tmp_path / "sheared"), anisotropic=True, ftol=1e-8).loc["mg"]
+    assert relaxed["alpha"] == pytest.approx(90.0, abs=1e-3) and relaxed["beta"] == pytest.approx(90.0, abs=1e-3)   # the shear relaxes away
